@@ -235,8 +235,8 @@ public static class PageRenderer
             ? "<button class=\"trash-empty-button\" type=\"button\" id=\"emptyTrash\"><span class=\"context-icon delete-forever-icon\"></span><span>Empty trash</span></button>"
             : "";
         string contextMenuItems = trashMode
-            ? "<button type=\"button\" data-action=\"restore-trash\"><span class=\"context-icon restore-icon\"></span><span>Restore</span></button><button type=\"button\" data-action=\"delete-forever\"><span class=\"context-icon delete-forever-icon\"></span><span>Delete forever</span></button>"
-            : "<button type=\"button\" data-action=\"upload-file\"><span class=\"context-icon upload-file-icon\"></span><span>Upload file</span></button><button type=\"button\" data-action=\"upload-folder\"><span class=\"context-icon upload-folder-icon\"></span><span>Upload folder</span></button><button type=\"button\" data-action=\"new-file\"><span class=\"context-icon new-file-icon\"></span><span>New empty file</span></button><button type=\"button\" data-action=\"new-folder\"><span class=\"context-icon new-folder-icon\"></span><span>New folder</span></button><button type=\"button\" data-action=\"download-zip\"><span class=\"context-icon download-zip-icon\"></span><span>Download ZIP</span></button><button type=\"button\" data-action=\"move-selected-here\"><span class=\"context-icon move-here-icon\"></span><span>Move selected here</span></button><button type=\"button\" data-action=\"move-trash\"><span class=\"context-icon trash-icon\"></span><span>Move to trash</span></button>";
+            ? "<button type=\"button\" data-action=\"file-info\"><span class=\"context-icon info-icon\"></span><span>Informacje</span></button><button type=\"button\" data-action=\"restore-trash\"><span class=\"context-icon restore-icon\"></span><span>Restore</span></button><button type=\"button\" data-action=\"delete-forever\"><span class=\"context-icon delete-forever-icon\"></span><span>Delete forever</span></button>"
+            : "<button type=\"button\" data-action=\"file-info\"><span class=\"context-icon info-icon\"></span><span>Informacje</span></button><button type=\"button\" data-action=\"upload-file\"><span class=\"context-icon upload-file-icon\"></span><span>Upload file</span></button><button type=\"button\" data-action=\"upload-folder\"><span class=\"context-icon upload-folder-icon\"></span><span>Upload folder</span></button><button type=\"button\" data-action=\"new-file\"><span class=\"context-icon new-file-icon\"></span><span>New empty file</span></button><button type=\"button\" data-action=\"new-folder\"><span class=\"context-icon new-folder-icon\"></span><span>New folder</span></button><button type=\"button\" data-action=\"download-zip\"><span class=\"context-icon download-zip-icon\"></span><span>Download ZIP</span></button><button type=\"button\" data-action=\"move-selected-here\"><span class=\"context-icon move-here-icon\"></span><span>Move selected here</span></button><button type=\"button\" data-action=\"move-trash\"><span class=\"context-icon trash-icon\"></span><span>Move to trash</span></button>";
 
         return $$"""
         <section class="app-shell">
@@ -258,17 +258,13 @@ public static class PageRenderer
 
             <nav class="nav-list" aria-label="SkyVault sections">
               <p class="places-heading">Miejsca</p>
-              <a class="nav-item {{ActiveClass(currentView, "home")}}" href="/">
+              <a class="nav-item {{HomeActiveClass(currentView, currentDirectory)}}" href="/">
                 <img class="nav-icon-img" src="/assets/icons/user-home.svg" alt="">
                 <span>Katalog domowy</span>
               </a>
               <a class="nav-item {{ActiveClass(currentView, "documents")}}" href="/?view=documents">
                 <img class="nav-icon-img" src="/assets/icons/folder-documents.svg" alt="">
                 <span>Dokumenty</span>
-              </a>
-              <a class="nav-item {{ActiveClass(currentView, "music")}}" href="/?view=music">
-                <img class="nav-icon-img" src="/assets/icons/folder-music.svg" alt="">
-                <span>Muzyka</span>
               </a>
               <a class="nav-item {{ActiveClass(currentView, "images")}}" href="/?view=images">
                 <img class="nav-icon-img" src="/assets/icons/folder-pictures.svg" alt="">
@@ -278,6 +274,10 @@ public static class PageRenderer
                 <img class="nav-icon-img" src="/assets/icons/folder-videos.svg" alt="">
                 <span>Filmy</span>
               </a>
+              <a class="nav-item {{ActiveClass(currentView, "music")}}" href="/?view=music">
+                <img class="nav-icon-img" src="/assets/icons/folder-music.svg" alt="">
+                <span>Muzyka</span>
+              </a>
               <a class="nav-item {{ActiveClass(currentView, "recent")}}" href="/?view=recent">
                 <img class="nav-icon-img" src="/assets/icons/document-open-recent.svg" alt="">
                 <span>Ostatnie pliki</span>
@@ -286,6 +286,7 @@ public static class PageRenderer
                 <img class="nav-icon-img" src="/assets/icons/user-trash.svg" alt="">
                 <span>Kosz</span>
               </a>
+
             </nav>
 
             <div class="storage-summary">
@@ -294,7 +295,7 @@ public static class PageRenderer
                 {{largestFiles}}
               </div>
               <div class="drive-row">
-                <img class="nav-icon-img" src="/assets/icons/drive-harddisk.svg" alt="">
+                <img class="nav-icon-img" src="/assets/icons/media-flash-sd-mmc.svg" alt="">
                 <span>Skydysk</span>
                 <button class="drive-toggle" id="driveToggle" type="button" aria-label="Pokaż największe pliki" aria-expanded="false">
                   <img class="drive-eject-icon" src="/assets/icons/media-eject.svg" alt="">
@@ -323,16 +324,7 @@ public static class PageRenderer
             <div class="location-row">
               <div class="path-bar" aria-label="Current cloud path">
                 <a class="path-up" href="{{parentHref}}" aria-label="Parent folder">..</a>
-                <span class="path-folder-icon" aria-hidden="true">
-                  <svg viewBox="0 0 22 22" focusable="false">
-                    <rect opacity="0.18" width="20" height="12" x="1" y="8.5" rx="1" ry="1"/>
-                    <path fill="#147eb8" d="M1 16c0 .554.446 1 1 1h18c.554 0 1-.446 1-1V5c0-.554-.446-1-1-1h-9c-1.5 0-2-2-3.5-2H2c-.554 0-1 .446-1 1"/>
-                    <rect opacity="0.18" width="20" height="12" x="1" y="7.5" rx="1" ry="1"/>
-                    <rect fill="#e4e4e4" width="16" height="8" x="3" y="6" rx="1" ry="1"/>
-                    <rect fill="#57b8ec" width="20" height="12" x="1" y="8" rx="1" ry="1"/>
-                    <path opacity="0.1" fill="#ffffff" d="M2 2c-.554 0-1 .446-1 1v.5c0-.554.446-1 1-1h5.5c1.5 0 2 2 3.5 2h9c.554 0 1 .446 1 1V5c0-.554-.446-1-1-1h-9c-1.5 0-2-2-3.5-2z"/>
-                  </svg>
-                </span>
+                <img class="path-folder-icon" src="/assets/icons/folder.svg" alt="" aria-hidden="true">
                 <div class="path-breadcrumbs" id="pathBreadcrumbs">
                   {{pathBreadcrumbs}}
                 </div>
@@ -362,9 +354,23 @@ public static class PageRenderer
             <section class="files-panel" id="filesPanel" data-view="{{currentView}}">
               <div class="section-head">
                 <div class="file-actions">
-                  <span>{{visibleFiles.Count}} item(s)</span>
+                  <span id="fileCount">{{visibleFiles.Count}} element(y)</span>
                   <div class="file-actions-right">
                     {{trashActions}}
+                    <div class="file-search" id="fileSearchBox" hidden>
+                      <input id="fileSearchInput" type="search" autocomplete="off" placeholder="Szukaj">
+                    </div>
+                    <button class="tool-button search-toggle" id="fileSearchToggle" type="button" aria-label="Szukaj" aria-expanded="false">
+                      <span class="search-icon"></span>
+                    </button>
+                    <select class="sort-select" id="sortSelect" aria-label="Sortuj pliki">
+                      <option value="modified-desc">Data: najnowsze</option>
+                      <option value="modified-asc">Data: najstarsze</option>
+                      <option value="name-asc">Nazwa: A-Z</option>
+                      <option value="name-desc">Nazwa: Z-A</option>
+                      <option value="size-desc">Rozmiar: największe</option>
+                      <option value="size-asc">Rozmiar: najmniejsze</option>
+                    </select>
                     <div class="view-switch" aria-label="File view">
                       <button class="view-button active" type="button" data-view-mode="list" aria-label="List view">
                         <span class="view-list-icon"></span>
@@ -380,9 +386,9 @@ public static class PageRenderer
               <table class="files-table" id="filesTable">
                 <thead>
                   <tr>
-                    <th><button class="sort-button" type="button" data-sort="name">Name</button></th>
-                    <th><button class="sort-button" type="button" data-sort="size">Size</button></th>
-                    <th><button class="sort-button active" type="button" data-sort="modified">Modified</button></th>
+                    <th>Nazwa</th>
+                    <th>Rozmiar</th>
+                    <th>Data</th>
                   </tr>
                 </thead>
                 <tbody id="fileRows">
@@ -417,6 +423,15 @@ public static class PageRenderer
             </div>
           </div>
         </div>
+        <div class="ui-confirm" id="uiInfo" hidden>
+          <div class="ui-confirm-panel file-info-panel" role="dialog" aria-modal="true" aria-labelledby="uiInfoTitle">
+            <p id="uiInfoTitle">Informacje o pliku</p>
+            <dl class="file-info-list" id="uiInfoList"></dl>
+            <div class="ui-confirm-actions">
+              <button type="button" class="primary" id="uiInfoOk">OK</button>
+            </div>
+          </div>
+        </div>
         <script>
           const form = document.getElementById('uploadForm');
           const input = document.getElementById('fileInput');
@@ -431,12 +446,17 @@ public static class PageRenderer
           const pathEditorInput = document.getElementById('pathEditorInput');
           const pathBreadcrumbs = document.getElementById('pathBreadcrumbs');
           const pathCrumbs = Array.from(document.querySelectorAll('.path-crumb'));
+          const workspace = document.querySelector('.workspace');
           const rows = Array.from(document.querySelectorAll('#fileRows tr[data-file-name]'));
           const filesPanel = document.getElementById('filesPanel');
           const trashMode = filesPanel.dataset.view === 'trash';
           const contextMenu = document.getElementById('contextMenu');
-          const sortButtons = Array.from(document.querySelectorAll('.sort-button'));
           const viewButtons = Array.from(document.querySelectorAll('.view-button'));
+          const fileCount = document.getElementById('fileCount');
+          const fileSearchToggle = document.getElementById('fileSearchToggle');
+          const fileSearchBox = document.getElementById('fileSearchBox');
+          const fileSearchInput = document.getElementById('fileSearchInput');
+          const sortSelect = document.getElementById('sortSelect');
           const emptyTrashButton = document.getElementById('emptyTrash');
           const uiConfirm = document.getElementById('uiConfirm');
           const uiConfirmText = document.getElementById('uiConfirmText');
@@ -447,12 +467,16 @@ public static class PageRenderer
           const uiPromptInput = document.getElementById('uiPromptInput');
           const uiPromptCancel = document.getElementById('uiPromptCancel');
           const uiPromptOk = document.getElementById('uiPromptOk');
+          const uiInfo = document.getElementById('uiInfo');
+          const uiInfoList = document.getElementById('uiInfoList');
+          const uiInfoOk = document.getElementById('uiInfoOk');
           const fileRows = document.getElementById('fileRows');
           const filesTable = document.getElementById('filesTable');
           const filesGrid = document.getElementById('filesGrid');
           const cards = Array.from(document.querySelectorAll('.file-card'));
           const rowsByPath = new Map(rows.map((row) => [row.dataset.filePath || '', row]));
           const cardsByPath = new Map(cards.map((card) => [card.dataset.filePath || '', card]));
+          const contextMenuInfo = contextMenu.querySelector('[data-action="file-info"]');
           const contextMenuMoveHere = contextMenu.querySelector('[data-action="move-selected-here"]');
           const moveDragType = 'application/x-skyvault-move-paths';
           let currentSort = 'modified';
@@ -470,9 +494,11 @@ public static class PageRenderer
           let promptResolver = null;
           let contextMenuTargetPath = '';
           let contextMenuTargetKind = '';
+          let searchQuery = '';
           const selectedPaths = new Set();
 
           sortRows();
+          applyFileFilter();
           setFileView(fileViewMode);
           selectionBox.className = 'selection-box';
           selectionBox.hidden = true;
@@ -616,19 +642,44 @@ public static class PageRenderer
             });
           });
 
-          sortButtons.forEach((button) => {
-            button.addEventListener('click', () => {
-              const sort = button.dataset.sort;
+          sortSelect.addEventListener('change', () => {
+            const [sort, direction] = sortSelect.value.split('-');
+            currentSort = sort;
+            sortDirection = direction;
+            sortRows();
+          });
 
-              if (currentSort === sort) {
-                sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
-              } else {
-                currentSort = sort;
-                sortDirection = sort === 'modified' ? 'desc' : 'asc';
-              }
+          fileSearchToggle.addEventListener('click', () => {
+            const open = fileSearchBox.hidden;
+            fileSearchBox.hidden = !open;
+            fileSearchToggle.setAttribute('aria-expanded', String(open));
 
-              sortRows();
-            });
+            if (open) {
+              fileSearchInput.focus();
+              fileSearchInput.select();
+              return;
+            }
+
+            fileSearchInput.value = '';
+            searchQuery = '';
+            applyFileFilter();
+          });
+
+          fileSearchInput.addEventListener('input', () => {
+            searchQuery = fileSearchInput.value.trim().toLowerCase();
+            applyFileFilter();
+          });
+
+          fileSearchInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              fileSearchInput.value = '';
+              searchQuery = '';
+              applyFileFilter();
+              fileSearchBox.hidden = true;
+              fileSearchToggle.setAttribute('aria-expanded', 'false');
+              fileSearchToggle.focus();
+            }
           });
 
           viewButtons.forEach((button) => {
@@ -683,6 +734,16 @@ public static class PageRenderer
             }
           });
 
+          uiInfoOk.addEventListener('click', () => {
+            uiInfo.hidden = true;
+          });
+
+          uiInfo.addEventListener('click', (event) => {
+            if (event.target === uiInfo) {
+              uiInfo.hidden = true;
+            }
+          });
+
           rows.forEach((row) => {
             row.addEventListener('click', (event) => {
               if (event.button !== 0 || event.target.closest('a, input, button')) {
@@ -699,6 +760,8 @@ public static class PageRenderer
             row.addEventListener('dragend', () => {
               clearDropTargets();
             });
+
+            setupFolderDropTarget(row, row.dataset.filePath || '', row.dataset.entryKind || '');
           });
 
           cards.forEach((card) => {
@@ -723,10 +786,12 @@ public static class PageRenderer
 
               applyRowSelection(row, event);
             });
+
+            setupFolderDropTarget(card, card.dataset.filePath || '', card.dataset.entryKind || '');
           });
 
-          filesPanel.addEventListener('mousedown', (event) => {
-            if (event.button !== 0 || event.target.closest('tr[data-file-name], .file-card, a, input, button')) {
+          workspace.addEventListener('mousedown', (event) => {
+            if (!canStartBoxSelection(event)) {
               return;
             }
 
@@ -871,6 +936,7 @@ public static class PageRenderer
           document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
               hideContextMenu();
+              uiInfo.hidden = true;
             }
           });
 
@@ -882,6 +948,7 @@ public static class PageRenderer
             }
 
             const action = button.dataset.action;
+            const targetPath = contextMenuTargetPath;
             hideContextMenu();
 
             if (action === 'upload-file') {
@@ -910,8 +977,13 @@ public static class PageRenderer
               return;
             }
 
+            if (action === 'file-info') {
+              showFileInfo(targetPath);
+              return;
+            }
+
             if (action === 'move-selected-here') {
-              await moveSelectedToFolder(contextMenuTargetPath);
+              await moveSelectedToFolder(targetPath);
               return;
             }
 
@@ -1158,6 +1230,9 @@ public static class PageRenderer
           function showContextMenu(x, y, targetPath = '', targetKind = '') {
             contextMenuTargetPath = targetPath;
             contextMenuTargetKind = targetKind;
+            if (contextMenuInfo) {
+              contextMenuInfo.hidden = !targetPath;
+            }
             if (contextMenuMoveHere) {
               contextMenuMoveHere.hidden = targetKind !== 'folder' || !targetPath || selectedPaths.size === 0;
             }
@@ -1174,9 +1249,44 @@ public static class PageRenderer
             contextMenu.hidden = true;
             contextMenuTargetPath = '';
             contextMenuTargetKind = '';
+            if (contextMenuInfo) {
+              contextMenuInfo.hidden = true;
+            }
             if (contextMenuMoveHere) {
               contextMenuMoveHere.hidden = true;
             }
+          }
+
+          function showFileInfo(path) {
+            const row = rowsByPath.get(path);
+
+            if (!row) {
+              return;
+            }
+
+            const kind = row.dataset.entryKind === 'folder' ? 'Folder' : 'Plik';
+            const size = formatBytes(Number(row.dataset.sortSize || '0'));
+            const modified = new Date(Number(row.dataset.sortModified || '0') * 1000).toLocaleString();
+            const values = [
+              ['Nazwa', path.split('/').pop() || path],
+              ['Ścieżka', path],
+              ['Typ', kind],
+              ['Rozmiar', kind === 'Folder' ? 'Folder' : size],
+              ['Modyfikacja', modified]
+            ];
+
+            uiInfoList.replaceChildren();
+            values.forEach(([label, value]) => {
+              const term = document.createElement('dt');
+              term.textContent = label;
+              const description = document.createElement('dd');
+              description.textContent = value;
+              description.title = value;
+              uiInfoList.append(term, description);
+            });
+
+            uiInfo.hidden = false;
+            uiInfoOk.focus();
           }
 
           function updateSelectedFiles() {
@@ -1202,6 +1312,23 @@ public static class PageRenderer
 
           function getSelectionBoxRect() {
             return selectionBox.getBoundingClientRect();
+          }
+
+          function canStartBoxSelection(event) {
+            if (event.button !== 0) {
+              return false;
+            }
+
+            if (event.target.closest('tr[data-file-name], .file-card, a, input, button, .workspace-top, .location-row, .alert-slot, .context-menu, .ui-confirm')) {
+              return false;
+            }
+
+            const workspaceRect = workspace.getBoundingClientRect();
+
+            return event.clientX >= workspaceRect.left
+              && event.clientX <= workspaceRect.right
+              && event.clientY >= workspaceRect.top
+              && event.clientY <= workspaceRect.bottom;
           }
 
           function applyBoxSelection(selectionRect) {
@@ -1285,6 +1412,18 @@ public static class PageRenderer
 
           function clearSelection() {
             [...selectedPaths].forEach((path) => setRowSelected(rowsByPath.get(path) || null, false));
+          }
+
+          function updateSelectionStyles() {
+            rows.forEach((row) => {
+              const selected = selectedPaths.has(row.dataset.filePath || '');
+              row.classList.toggle('is-selected', selected);
+
+              const card = getCardForRow(row);
+              if (card) {
+                card.classList.toggle('is-selected', selected);
+              }
+            });
           }
 
           function setRowSelected(row, selected) {
@@ -1493,6 +1632,54 @@ public static class PageRenderer
           function clearDropTargets() {
             pathBar.classList.remove('is-drop-target');
             pathCrumbs.forEach((crumb) => crumb.classList.remove('is-drop-target'));
+            document.querySelectorAll('.is-folder-drop-target').forEach((target) => {
+              target.classList.remove('is-folder-drop-target');
+            });
+          }
+
+          function setupFolderDropTarget(element, targetPath, targetKind) {
+            if (targetKind !== 'folder' || !targetPath) {
+              return;
+            }
+
+            element.addEventListener('dragover', (event) => {
+              if (!hasMoveDrag(event.dataTransfer)) {
+                return;
+              }
+
+              const draggedPaths = getDraggedMovePaths(event.dataTransfer);
+
+              if (draggedPaths.includes(targetPath)) {
+                return;
+              }
+
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = 'move';
+              clearDropTargets();
+              element.classList.add('is-folder-drop-target');
+            });
+
+            element.addEventListener('dragleave', () => {
+              element.classList.remove('is-folder-drop-target');
+            });
+
+            element.addEventListener('drop', async (event) => {
+              if (!hasMoveDrag(event.dataTransfer)) {
+                return;
+              }
+
+              const draggedPaths = getDraggedMovePaths(event.dataTransfer);
+
+              if (!draggedPaths.length || draggedPaths.includes(targetPath)) {
+                return;
+              }
+
+              event.preventDefault();
+              event.stopPropagation();
+              clearDropTargets();
+              await moveDraggedFiles(draggedPaths, targetPath);
+            });
           }
 
           function beginMoveDrag(event, sourcePath, sourceKind) {
@@ -1531,8 +1718,12 @@ public static class PageRenderer
               card.className = 'move-drag-card';
               card.style.zIndex = String(10 - index);
 
-              const icon = document.createElement('span');
-              icon.className = sourceKind === 'folder' ? 'folder-icon move-drag-folder-icon' : 'file-icon';
+              const icon = document.createElement(sourceKind === 'folder' ? 'img' : 'span');
+              icon.className = sourceKind === 'folder' ? 'folder-icon-img move-drag-folder-icon' : 'file-icon';
+              if (sourceKind === 'folder') {
+                icon.src = '/assets/icons/folder.svg';
+                icon.alt = '';
+              }
               card.appendChild(icon);
               stack.appendChild(card);
             });
@@ -1706,11 +1897,38 @@ public static class PageRenderer
 
             sorted.forEach((row) => fileRows.appendChild(row));
             sortedCards.forEach((card) => filesGrid.appendChild(card));
-            sortButtons.forEach((button) => {
-              button.classList.toggle('active', button.dataset.sort === currentSort);
-              button.textContent = button.dataset.sort[0].toUpperCase() + button.dataset.sort.slice(1)
-                + (button.dataset.sort === currentSort ? (sortDirection === 'asc' ? ' asc' : ' desc') : '');
+            syncSortSelect();
+          }
+
+          function syncSortSelect() {
+            sortSelect.value = currentSort + '-' + sortDirection;
+          }
+
+          function applyFileFilter() {
+            let visibleCount = 0;
+
+            rows.forEach((row) => {
+              const path = row.dataset.filePath || '';
+              const name = row.dataset.fileName || '';
+              const visible = !searchQuery
+                || name.includes(searchQuery)
+                || path.toLowerCase().includes(searchQuery);
+              row.hidden = !visible;
+
+              const card = cardsByPath.get(path);
+              if (card) {
+                card.hidden = !visible;
+              }
+
+              if (visible) {
+                visibleCount += 1;
+              } else {
+                selectedPaths.delete(path);
+              }
             });
+
+            fileCount.textContent = visibleCount + ' element(y)';
+            updateSelectionStyles();
           }
 
           function setFileView(mode) {
@@ -1743,15 +1961,17 @@ public static class PageRenderer
     private static string RenderFileRow(FileEntry file, bool allowOpen = true)
     {
         string displayName = GetDisplayName(file.Name);
-        string iconClass = file.IsFolder ? "folder-icon row-folder-icon" : "file-icon";
+        string iconMarkup = file.IsFolder
+            ? """<img class="folder-icon-img row-folder-icon" src="/assets/icons/folder.svg" alt="">"""
+            : $"""<img class="file-icon-img row-file-icon" src="/assets/icons/{GetFileIconName(file)}" alt="">""";
         string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
         string encodedPath = WebUtility.UrlEncode(file.Name);
         string draggableAttr = " draggable=\"true\"";
         string nameContent = allowOpen
             ? file.IsFolder
-                ? $"<a href=\"/?path={encodedPath}\">{Escape(displayName)}</a>"
-                : $"<a href=\"/files/open?path={encodedPath}\">{Escape(displayName)}</a>"
-            : Escape(displayName);
+                ? $"<a href=\"/?path={encodedPath}\" title=\"{Escape(displayName)}\">{Escape(displayName)}</a>"
+                : $"<a href=\"/files/open?path={encodedPath}\" title=\"{Escape(displayName)}\">{Escape(displayName)}</a>"
+            : $"""<span title="{Escape(displayName)}">{Escape(displayName)}</span>""";
         string uploadedClass = !file.IsFolder && DateTimeOffset.UtcNow - file.ModifiedAt < TimeSpan.FromMinutes(5)
             ? " class=\"fresh-upload\""
             : "";
@@ -1761,7 +1981,7 @@ public static class PageRenderer
         <tr{{uploadedClass}}{{draggableAttr}} data-file-path="{{Escape(file.Name)}}" data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
           <td>
             <span class="file-name">
-              <span class="{{iconClass}}"></span>
+              {{iconMarkup}}
               <span>{{nameContent}}</span>
             </span>
           </td>
@@ -1774,20 +1994,22 @@ public static class PageRenderer
     private static string RenderFileCard(FileEntry file, bool allowOpen = true)
     {
         string displayName = GetDisplayName(file.Name);
-        string iconClass = file.IsFolder ? "folder-icon grid-folder-icon" : "file-icon grid-file-icon";
+        string iconMarkup = file.IsFolder
+            ? """<img class="folder-icon-img grid-folder-icon" src="/assets/icons/folder.svg" alt="">"""
+            : $"""<img class="file-icon-img grid-file-icon" src="/assets/icons/{GetFileIconName(file)}" alt="">""";
         string encodedPath = WebUtility.UrlEncode(file.Name);
         string href = file.IsFolder ? $"/?path={encodedPath}" : $"/files/open?path={encodedPath}";
         string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
         string draggableAttr = " draggable=\"true\"";
         string content = allowOpen
-            ? $"""<a class="file-card-link" href="{href}">{Escape(displayName)}</a>"""
-            : $"""<span class="file-card-link">{Escape(displayName)}</span>""";
+            ? $"""<a class="file-card-link" href="{href}" title="{Escape(displayName)}">{Escape(displayName)}</a>"""
+            : $"""<span class="file-card-link" title="{Escape(displayName)}">{Escape(displayName)}</span>""";
         long modifiedUnix = file.ModifiedAt.ToUnixTimeSeconds();
 
         return $$"""
         <div class="file-card"{{draggableAttr}} data-file-path="{{Escape(file.Name)}}" data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
           <div class="file-card-preview">
-            <span class="{{iconClass}}"></span>
+            {{iconMarkup}}
           </div>
           <div class="file-card-body">
             {{content}}
@@ -1818,6 +2040,49 @@ public static class PageRenderer
 
         string text = Encoding.UTF8.GetString(content);
         return $"""<pre class="text-preview">{Escape(text)}</pre>""";
+    }
+
+    private static string GetFileIconName(FileEntry file)
+    {
+        if (file.SizeBytes == 0)
+        {
+            return "application-x-zerosize.svg";
+        }
+
+        return Path.GetExtension(file.Name).ToLowerInvariant() switch
+        {
+            ".txt" or ".log" => "text-plain.svg",
+            ".md" or ".markdown" => "text-x-markdown.svg",
+            ".json" => "application-json.svg",
+            ".xml" => "text-xml.svg",
+            ".html" or ".htm" => "text-html.svg",
+            ".css" => "text-css.svg",
+            ".js" or ".mjs" or ".cjs" => "application-x-javascript.svg",
+            ".cs" => "text-x-csharp.svg",
+            ".py" => "text-x-python.svg",
+            ".sh" or ".bash" or ".zsh" => "application-x-executable.svg",
+            ".pdf" => "application-pdf.svg",
+            ".zip" => "application-zip.svg",
+            ".tar" => "application-x-tar.svg",
+            ".gz" or ".tgz" => "application-x-gzip.svg",
+            ".rar" => "application-x-rar.svg",
+            ".7z" => "application-x-7z-compressed.svg",
+            ".jpg" or ".jpeg" => "image-jpeg.svg",
+            ".png" => "image-png.svg",
+            ".gif" => "image-gif.svg",
+            ".bmp" => "image-bmp.svg",
+            ".svg" => "image-svg+xml.svg",
+            ".webp" => "image-x-generic.svg",
+            ".mp3" => "audio-x-mpeg.svg",
+            ".wav" => "audio-x-wav.svg",
+            ".flac" => "audio-x-flac.svg",
+            ".ogg" or ".oga" or ".opus" or ".m4a" or ".aac" => "audio-x-generic.svg",
+            ".mp4" or ".m4v" or ".mov" => "video-mp4.svg",
+            ".mkv" => "video-x-matroska.svg",
+            ".webm" => "video-webm.svg",
+            ".ogv" => "video-x-theora+ogg.svg",
+            _ => "application-octet-stream.svg",
+        };
     }
 
     private static string RenderLargestFiles(IReadOnlyList<FileEntry> files)
@@ -1987,6 +2252,19 @@ public static class PageRenderer
         return NormalizeView(currentView) == expectedView ? "active" : "";
     }
 
+    private static string HomeActiveClass(string currentView, string currentDirectory)
+    {
+        return NormalizeView(currentView) == "home" && NormalizeCloudPath(currentDirectory).Length == 0 ? "active" : "";
+    }
+
+    private static string PathActiveClass(string currentView, string currentDirectory, string expectedPath)
+    {
+        return NormalizeView(currentView) == "home"
+            && string.Equals(NormalizeCloudPath(currentDirectory), NormalizeCloudPath(expectedPath), StringComparison.OrdinalIgnoreCase)
+                ? "active"
+                : "";
+    }
+
     private static string GetParentDirectory(string currentDirectory)
     {
         currentDirectory = NormalizeCloudPath(currentDirectory);
@@ -2037,7 +2315,7 @@ public static class PageRenderer
           <title>SkyVault</title>
           <style>
             :root {
-              --bg: #080b0a;
+              --bg: #000000;
               --surface: #101512;
               --surface-soft: #17221b;
               --line: #25342b;
@@ -2371,6 +2649,12 @@ public static class PageRenderer
               flex: 0 0 auto;
             }
 
+            .file-icon-img {
+              display: block;
+              flex: 0 0 auto;
+              object-fit: contain;
+            }
+
             .home-icon {
               width: 16px;
               height: 16px;
@@ -2407,6 +2691,12 @@ public static class PageRenderer
               border: 2px solid currentColor;
               border-bottom: 0;
               border-radius: 3px 3px 0 0;
+            }
+
+            .folder-icon-img {
+              display: block;
+              flex: 0 0 auto;
+              object-fit: contain;
             }
 
             .clock-icon {
@@ -2890,6 +3180,84 @@ public static class PageRenderer
               gap: 10px;
             }
 
+            .file-search {
+              flex: 0 1 260px;
+              min-width: 160px;
+            }
+
+            .file-search[hidden] {
+              display: none;
+            }
+
+            .file-search input,
+            .sort-select {
+              width: 100%;
+              height: 36px;
+              border: 1px solid var(--line-strong);
+              border-radius: 8px;
+              background: #ffffff;
+              color: #111827;
+              font: inherit;
+              font-size: 14px;
+            }
+
+            .file-search input {
+              padding: 0 10px;
+            }
+
+            .file-search input:focus,
+            .sort-select:focus {
+              outline: 2px solid rgba(75, 159, 104, 0.35);
+              outline-offset: 1px;
+            }
+
+            .sort-select {
+              width: 172px;
+              padding: 0 9px;
+            }
+
+            .tool-button {
+              display: inline-grid;
+              place-items: center;
+              width: 36px;
+              min-height: 36px;
+              margin: 0;
+              padding: 0;
+              border: 1px solid var(--line-strong);
+              border-radius: 8px;
+              background: #ffffff;
+              color: #64748b;
+              box-shadow: none;
+            }
+
+            .tool-button:hover,
+            .tool-button[aria-expanded="true"] {
+              background: #eef4ff;
+              color: var(--blue);
+            }
+
+            .search-icon {
+              position: relative;
+              display: block;
+              width: 16px;
+              height: 16px;
+              border: 2px solid currentColor;
+              border-radius: 999px;
+            }
+
+            .search-icon::after {
+              content: "";
+              position: absolute;
+              right: -6px;
+              bottom: -4px;
+              width: 7px;
+              height: 2px;
+              border-radius: 999px;
+              background: currentColor;
+              transform: rotate(45deg);
+              transform-origin: left center;
+            }
+
             .trash-empty-button {
               display: inline-flex;
               align-items: center;
@@ -3035,14 +3403,32 @@ public static class PageRenderer
             table {
               width: 100%;
               border-collapse: collapse;
+              table-layout: fixed;
               user-select: none;
             }
 
             th, td {
+              overflow: hidden;
               padding: 10px 8px;
               border-top: 1px solid #edf1f7;
               text-align: left;
+              text-overflow: ellipsis;
               white-space: nowrap;
+            }
+
+            th:nth-child(1),
+            td:nth-child(1) {
+              width: auto;
+            }
+
+            th:nth-child(2),
+            td:nth-child(2) {
+              width: 130px;
+            }
+
+            th:nth-child(3),
+            td:nth-child(3) {
+              width: 180px;
             }
 
             th {
@@ -3050,21 +3436,6 @@ public static class PageRenderer
               font-size: 12px;
               font-weight: 800;
               text-transform: uppercase;
-            }
-
-            .sort-button {
-              min-height: 0;
-              margin: 0;
-              padding: 0;
-              background: transparent;
-              color: inherit;
-              font-size: inherit;
-              font-weight: inherit;
-              text-transform: inherit;
-            }
-
-            .sort-button.active {
-              color: var(--blue);
             }
 
             tbody tr:hover {
@@ -3090,6 +3461,13 @@ public static class PageRenderer
 
             tbody tr.is-selected:hover {
               background: #cfe1ff;
+            }
+
+            tbody tr.is-folder-drop-target,
+            tbody tr.is-folder-drop-target:hover {
+              background: rgba(75, 159, 104, 0.26);
+              outline: 1px solid var(--green);
+              outline-offset: -1px;
             }
 
             tbody tr.fresh-upload {
@@ -3140,6 +3518,12 @@ public static class PageRenderer
               box-shadow: inset 4px 0 0 var(--blue);
             }
 
+            .file-card.is-folder-drop-target {
+              border-color: var(--green);
+              background: rgba(75, 159, 104, 0.24);
+              box-shadow: inset 0 0 0 1px var(--green);
+            }
+
             .file-card-preview {
               position: relative;
               display: grid;
@@ -3155,27 +3539,13 @@ public static class PageRenderer
             }
 
             .grid-file-icon {
-              width: 42px;
-              height: 50px;
-            }
-
-            .grid-file-icon::after {
-              width: 14px;
-              height: 14px;
+              width: 58px;
+              height: 58px;
             }
 
             .grid-folder-icon {
               width: 58px;
               height: 42px;
-              color: #2563eb;
-              background: #dbeafe;
-            }
-
-            .grid-folder-icon::before {
-              left: 3px;
-              top: -13px;
-              width: 24px;
-              height: 12px;
             }
 
             .file-card-body {
@@ -3194,7 +3564,8 @@ public static class PageRenderer
               font-size: 13px;
               font-weight: 700;
               line-height: 1.25;
-              overflow-wrap: anywhere;
+              text-overflow: ellipsis;
+              white-space: nowrap;
             }
 
             .file-card-link:hover {
@@ -3269,16 +3640,7 @@ public static class PageRenderer
 
             .move-drag-folder-icon {
               width: 16px;
-              height: 12px;
-              border-width: 1px;
-            }
-
-            .move-drag-folder-icon::before {
-              left: 0;
-              top: -4px;
-              width: 7px;
-              height: 4px;
-              border-width: 1px;
+              height: 16px;
             }
 
             .move-drag-count {
@@ -3314,7 +3676,18 @@ public static class PageRenderer
               align-items: center;
               gap: 11px;
               min-width: 0;
+              width: 100%;
+              overflow: hidden;
               font-weight: 700;
+            }
+
+            .file-name > span:last-child,
+            .file-name a {
+              display: block;
+              min-width: 0;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
             }
 
             .file-icon {
@@ -3338,11 +3711,14 @@ public static class PageRenderer
               border-radius: 0 3px 0 3px;
             }
 
+            .row-file-icon {
+              width: 24px;
+              height: 24px;
+            }
+
             .row-folder-icon {
               width: 24px;
-              height: 18px;
-              color: #2563eb;
-              background: #dbeafe;
+              height: 24px;
             }
 
             .ui-confirm {
@@ -3378,6 +3754,34 @@ public static class PageRenderer
 
             .ui-confirm-panel input {
               margin: 0;
+            }
+
+            .file-info-panel {
+              width: min(460px, calc(100vw - 32px));
+            }
+
+            .file-info-list {
+              display: grid;
+              grid-template-columns: 110px minmax(0, 1fr);
+              gap: 8px 14px;
+              margin: 0;
+            }
+
+            .file-info-list dt {
+              color: var(--muted);
+              font-size: 13px;
+              font-weight: 800;
+            }
+
+            .file-info-list dd {
+              min-width: 0;
+              margin: 0;
+              overflow: hidden;
+              color: var(--text);
+              font-size: 13px;
+              font-weight: 700;
+              text-overflow: ellipsis;
+              white-space: nowrap;
             }
 
             .ui-confirm-actions {
@@ -3457,9 +3861,29 @@ public static class PageRenderer
             }
 
             .move-here-icon::before,
-            .move-here-icon::after {
+            .move-here-icon::after,
+            .info-icon::before,
+            .info-icon::after {
               content: "";
               position: absolute;
+            }
+
+            .info-icon::before {
+              left: 7px;
+              top: 6px;
+              width: 4px;
+              height: 8px;
+              border-radius: 999px;
+              background: currentColor;
+            }
+
+            .info-icon::after {
+              left: 7px;
+              top: 2px;
+              width: 4px;
+              height: 4px;
+              border-radius: 999px;
+              background: currentColor;
             }
 
             .move-here-icon::before {
@@ -3641,7 +4065,7 @@ public static class PageRenderer
 
             input {
               border-color: var(--line-strong);
-              background: #0a0f0c;
+              background: #000000;
               color: var(--text);
             }
 
@@ -3663,11 +4087,53 @@ public static class PageRenderer
             }
 
             .sidebar {
-              background: #0a0f0c;
+              background: #000000;
               border-right-color: var(--line);
             }
 
             .nav-item {
+              color: #b8c9bf;
+            }
+
+            .sidebar .nav-list {
+              gap: 2px;
+              margin-top: 6px;
+            }
+
+            .sidebar .places-heading {
+              margin: 8px 0 2px;
+              padding: 0 7px;
+              font-size: 14px;
+              font-weight: 400;
+            }
+
+            .sidebar .nav-item {
+              min-height: 29px;
+              gap: 8px;
+              padding: 0 7px;
+              border-radius: 3px;
+              font-size: 14px;
+              font-weight: 400;
+            }
+
+            .sidebar .nav-icon-img {
+              width: 16px;
+              height: 16px;
+            }
+
+            .sidebar .nav-item span {
+              min-width: 0;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .nav-item-static {
+              cursor: default;
+            }
+
+            .nav-item-static:hover {
+              background: transparent;
               color: #b8c9bf;
             }
 
@@ -3727,7 +4193,6 @@ public static class PageRenderer
             }
 
             .path-crumb:hover,
-            .sort-button.active,
             a {
               color: #8fcca4;
             }
@@ -3738,19 +4203,30 @@ public static class PageRenderer
 
             .path-crumb.is-drop-target,
             .view-button.active,
+            .tool-button[aria-expanded="true"],
             .context-menu button:hover {
               background: var(--surface-soft);
               color: #8fcca4;
             }
 
-            .view-button {
+            .view-button,
+            .tool-button {
               color: var(--muted);
             }
 
             .view-button:hover,
+            .tool-button:hover,
             .path-up:hover,
             .path-editor-button:hover {
               background: var(--surface-soft);
+              color: var(--text);
+            }
+
+            .file-search input,
+            .sort-select,
+            .tool-button {
+              border-color: var(--line-strong);
+              background: var(--surface);
               color: var(--text);
             }
 
@@ -3824,6 +4300,72 @@ public static class PageRenderer
               color: #f87171;
             }
 
+            .home-icon,
+            .home-icon::after {
+              background: #4b9f68;
+            }
+
+            .path-folder-icon {
+              color: #6ab883;
+            }
+
+            .path-folder-icon svg * {
+              fill: currentColor;
+            }
+
+            .path-bar.is-drop-target {
+              border-color: #6ab883;
+              background: rgba(75, 159, 104, 0.08);
+              box-shadow: inset 0 -2px 0 #6ab883;
+            }
+
+            .file-icon {
+              border-color: #6f8276;
+              background: #121a15;
+            }
+
+            .file-icon::after {
+              border-color: #6f8276;
+              background: #101512;
+            }
+
+            .upload-file-icon::after,
+            .new-file-icon::after {
+              background: var(--surface);
+            }
+
+            .move-drag-card {
+              border-color: var(--line-strong);
+              background: rgba(16, 21, 18, 0.94);
+              box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+            }
+
+            .move-drag-count {
+              border-color: #4b9f68;
+              background: var(--surface-soft);
+              color: #c7e6d1;
+              box-shadow: 0 4px 10px rgba(0, 0, 0, 0.28);
+            }
+
+            .empty-grid {
+              border-color: var(--line);
+              color: var(--muted);
+            }
+
+            .text-preview {
+              color: var(--text);
+            }
+
+            .trash-empty-button {
+              border-color: #5d2525;
+              background: #7f1d1d;
+              color: #fee2e2;
+            }
+
+            .trash-empty-button:hover {
+              background: #991b1b;
+            }
+
             @media (max-width: 900px) {
               .app-shell {
                 grid-template-columns: 1fr;
@@ -3875,6 +4417,26 @@ public static class PageRenderer
               .section-head {
                 align-items: flex-start;
                 flex-direction: column;
+              }
+
+              .file-actions {
+                align-items: flex-start;
+                flex-direction: column;
+              }
+
+              .file-actions-right {
+                flex-wrap: wrap;
+                width: 100%;
+              }
+
+              .file-search {
+                flex: 1 1 100%;
+                width: 100%;
+              }
+
+              .sort-select {
+                flex: 1 1 170px;
+                width: auto;
               }
 
               th:nth-child(3),
