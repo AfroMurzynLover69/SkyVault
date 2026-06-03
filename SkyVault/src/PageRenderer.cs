@@ -204,6 +204,16 @@ public static class PageRenderer
     {
         currentDirectory = NormalizeCloudPath(currentDirectory);
         currentView = NormalizeView(currentView);
+      if (currentView == "trash" && currentDirectory.Length == 0)
+      {
+        currentDirectory = ".trash";
+      }
+
+      if (string.Equals(currentDirectory, ".trash", StringComparison.OrdinalIgnoreCase))
+      {
+        currentView = "trash";
+      }
+        bool trashMode = currentView == "trash";
         IReadOnlyList<FileEntry> visibleFiles = GetVisibleFiles(files, trashFiles, currentDirectory, currentView);
         double usedPercent = account.QuotaBytes == 0 ? 0 : account.UsedBytes * 100.0 / account.QuotaBytes;
         usedPercent = Math.Clamp(usedPercent, 0, 100);
@@ -221,6 +231,12 @@ public static class PageRenderer
         string parentDirectory = GetParentDirectory(currentDirectory);
         string parentHref = currentDirectory.Length == 0 ? "/" : $"/?path={WebUtility.UrlEncode(parentDirectory)}";
         string pathBreadcrumbs = RenderPathBreadcrumbs(currentDirectory);
+        string trashActions = trashMode
+            ? "<button class=\"trash-empty-button\" type=\"button\" id=\"emptyTrash\"><span class=\"context-icon delete-forever-icon\"></span><span>Empty trash</span></button>"
+            : "";
+        string contextMenuItems = trashMode
+            ? "<button type=\"button\" data-action=\"restore-trash\"><span class=\"context-icon restore-icon\"></span><span>Restore</span></button><button type=\"button\" data-action=\"delete-forever\"><span class=\"context-icon delete-forever-icon\"></span><span>Delete forever</span></button>"
+            : "<button type=\"button\" data-action=\"upload-file\"><span class=\"context-icon upload-file-icon\"></span><span>Upload file</span></button><button type=\"button\" data-action=\"upload-folder\"><span class=\"context-icon upload-folder-icon\"></span><span>Upload folder</span></button><button type=\"button\" data-action=\"new-file\"><span class=\"context-icon new-file-icon\"></span><span>New empty file</span></button><button type=\"button\" data-action=\"new-folder\"><span class=\"context-icon new-folder-icon\"></span><span>New folder</span></button><button type=\"button\" data-action=\"download-zip\"><span class=\"context-icon download-zip-icon\"></span><span>Download ZIP</span></button><button type=\"button\" data-action=\"move-selected-here\"><span class=\"context-icon move-here-icon\"></span><span>Move selected here</span></button><button type=\"button\" data-action=\"move-trash\"><span class=\"context-icon trash-icon\"></span><span>Move to trash</span></button>";
 
         return $$"""
         <section class="app-shell">
@@ -343,27 +359,27 @@ public static class PageRenderer
 
             {{alert}}
 
-            <section class="files-panel" id="filesPanel">
+            <section class="files-panel" id="filesPanel" data-view="{{currentView}}">
               <div class="section-head">
                 <div class="file-actions">
                   <span>{{visibleFiles.Count}} item(s)</span>
-                  <div class="view-switch" aria-label="File view">
-                    <button class="view-button active" type="button" data-view-mode="list" aria-label="List view">
-                      <span class="view-list-icon"></span>
-                    </button>
-                    <button class="view-button" type="button" data-view-mode="grid" aria-label="Icon view">
-                      <span class="view-grid-icon"></span>
-                    </button>
+                  <div class="file-actions-right">
+                    {{trashActions}}
+                    <div class="view-switch" aria-label="File view">
+                      <button class="view-button active" type="button" data-view-mode="list" aria-label="List view">
+                        <span class="view-list-icon"></span>
+                      </button>
+                      <button class="view-button" type="button" data-view-mode="grid" aria-label="Icon view">
+                        <span class="view-grid-icon"></span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <table class="files-table">
+              <table class="files-table" id="filesTable">
                 <thead>
                   <tr>
-                    <th class="select-column">
-                      <input id="selectAllFiles" type="checkbox" aria-label="Select all files">
-                    </th>
                     <th><button class="sort-button" type="button" data-sort="name">Name</button></th>
                     <th><button class="sort-button" type="button" data-sort="size">Size</button></th>
                     <th><button class="sort-button active" type="button" data-sort="modified">Modified</button></th>
@@ -380,30 +396,26 @@ public static class PageRenderer
           </main>
         </section>
         <div class="context-menu" id="contextMenu" hidden>
-          <button type="button" data-action="upload-file">
-            <span class="context-icon upload-file-icon"></span>
-            <span>Upload file</span>
-          </button>
-          <button type="button" data-action="upload-folder">
-            <span class="context-icon upload-folder-icon"></span>
-            <span>Upload folder</span>
-          </button>
-          <button type="button" data-action="new-file">
-            <span class="context-icon new-file-icon"></span>
-            <span>New empty file</span>
-          </button>
-          <button type="button" data-action="new-folder">
-            <span class="context-icon new-folder-icon"></span>
-            <span>New folder</span>
-          </button>
-          <button type="button" data-action="download-zip">
-            <span class="context-icon download-zip-icon"></span>
-            <span>Download ZIP</span>
-          </button>
-          <button type="button" data-action="move-trash">
-            <span class="context-icon trash-icon"></span>
-            <span>Move to trash</span>
-          </button>
+          {{contextMenuItems}}
+        </div>
+        <div class="ui-confirm" id="uiConfirm" hidden>
+          <div class="ui-confirm-panel" role="dialog" aria-modal="true" aria-labelledby="uiConfirmText">
+            <p id="uiConfirmText"></p>
+            <div class="ui-confirm-actions">
+              <button type="button" id="uiConfirmCancel">Cancel</button>
+              <button type="button" class="primary" id="uiConfirmOk">OK</button>
+            </div>
+          </div>
+        </div>
+        <div class="ui-confirm" id="uiPrompt" hidden>
+          <div class="ui-confirm-panel" role="dialog" aria-modal="true" aria-labelledby="uiPromptText">
+            <p id="uiPromptText"></p>
+            <input id="uiPromptInput" type="text" autocomplete="off">
+            <div class="ui-confirm-actions">
+              <button type="button" id="uiPromptCancel">Cancel</button>
+              <button type="button" class="primary" id="uiPromptOk">OK</button>
+            </div>
+          </div>
         </div>
         <script>
           const form = document.getElementById('uploadForm');
@@ -421,15 +433,27 @@ public static class PageRenderer
           const pathCrumbs = Array.from(document.querySelectorAll('.path-crumb'));
           const rows = Array.from(document.querySelectorAll('#fileRows tr[data-file-name]'));
           const filesPanel = document.getElementById('filesPanel');
+          const trashMode = filesPanel.dataset.view === 'trash';
           const contextMenu = document.getElementById('contextMenu');
-          const selectAllFiles = document.getElementById('selectAllFiles');
-          const fileChecks = Array.from(document.querySelectorAll('.file-check'));
           const sortButtons = Array.from(document.querySelectorAll('.sort-button'));
           const viewButtons = Array.from(document.querySelectorAll('.view-button'));
+          const emptyTrashButton = document.getElementById('emptyTrash');
+          const uiConfirm = document.getElementById('uiConfirm');
+          const uiConfirmText = document.getElementById('uiConfirmText');
+          const uiConfirmCancel = document.getElementById('uiConfirmCancel');
+          const uiConfirmOk = document.getElementById('uiConfirmOk');
+          const uiPrompt = document.getElementById('uiPrompt');
+          const uiPromptText = document.getElementById('uiPromptText');
+          const uiPromptInput = document.getElementById('uiPromptInput');
+          const uiPromptCancel = document.getElementById('uiPromptCancel');
+          const uiPromptOk = document.getElementById('uiPromptOk');
           const fileRows = document.getElementById('fileRows');
+          const filesTable = document.getElementById('filesTable');
           const filesGrid = document.getElementById('filesGrid');
           const cards = Array.from(document.querySelectorAll('.file-card'));
-          const gridChecks = Array.from(document.querySelectorAll('.grid-file-check'));
+          const rowsByPath = new Map(rows.map((row) => [row.dataset.filePath || '', row]));
+          const cardsByPath = new Map(cards.map((card) => [card.dataset.filePath || '', card]));
+          const contextMenuMoveHere = contextMenu.querySelector('[data-action="move-selected-here"]');
           const moveDragType = 'application/x-skyvault-move-paths';
           let currentSort = 'modified';
           let sortDirection = 'desc';
@@ -439,6 +463,11 @@ public static class PageRenderer
           let pointerSelecting = false;
           let pointerMode = true;
           let fileViewMode = localStorage.getItem('skyvaultFileView') || 'list';
+          let confirmResolver = null;
+          let promptResolver = null;
+          let contextMenuTargetPath = '';
+          let contextMenuTargetKind = '';
+          const selectedPaths = new Set();
 
           sortRows();
           setFileView(fileViewMode);
@@ -542,7 +571,12 @@ public static class PageRenderer
 
             if (autoUploadAfterPick && input.files.length) {
               autoUploadAfterPick = false;
-              uploadFileItems(fileItemsFromList(input.files));
+              uploadFileItems(fileItemsFromList(input.files), {
+                source: 'picker',
+                items: input.files.length,
+                files: input.files.length,
+                collected: input.files.length
+              });
               return;
             }
 
@@ -551,7 +585,12 @@ public static class PageRenderer
 
           folderInput.addEventListener('change', () => {
             if (folderInput.files.length) {
-              uploadFileItems(fileItemsFromList(folderInput.files));
+              uploadFileItems(fileItemsFromList(folderInput.files), {
+                source: 'folder-picker',
+                items: folderInput.files.length,
+                files: folderInput.files.length,
+                collected: folderInput.files.length
+              });
             }
           });
 
@@ -563,7 +602,12 @@ public static class PageRenderer
               return;
             }
 
-            await uploadFileItems(fileItemsFromList(input.files));
+            await uploadFileItems(fileItemsFromList(input.files), {
+              source: 'picker',
+              items: input.files.length,
+              files: input.files.length,
+              collected: input.files.length
+            });
           });
 
           sortButtons.forEach((button) => {
@@ -587,36 +631,60 @@ public static class PageRenderer
             });
           });
 
-          if (selectAllFiles) {
-            selectAllFiles.addEventListener('change', () => {
-              fileChecks.forEach((check) => {
-                if (!check.disabled && !check.closest('tr').hidden) {
-                  setRowSelected(check.closest('tr'), selectAllFiles.checked);
-                }
-              });
-              updateSelectedFiles();
+          if (emptyTrashButton) {
+            emptyTrashButton.addEventListener('click', async () => {
+              await emptyTrash();
             });
           }
 
-          fileChecks.forEach((check) => {
-            const row = check.closest('tr');
+          uiConfirmCancel.addEventListener('click', () => {
+            resolveConfirm(false);
+          });
 
-            check.addEventListener('click', (event) => {
-              event.stopPropagation();
-            });
+          uiConfirmOk.addEventListener('click', () => {
+            resolveConfirm(true);
+          });
 
-            check.addEventListener('change', () => {
-              setRowSelected(row, check.checked);
-              updateSelectedFiles();
-            });
+          uiConfirm.addEventListener('click', (event) => {
+            if (event.target === uiConfirm) {
+              resolveConfirm(false);
+            }
+          });
 
+          uiPromptCancel.addEventListener('click', () => {
+            resolvePrompt(null);
+          });
+
+          uiPromptOk.addEventListener('click', () => {
+            resolvePrompt(uiPromptInput.value);
+          });
+
+          uiPrompt.addEventListener('click', (event) => {
+            if (event.target === uiPrompt) {
+              resolvePrompt(null);
+            }
+          });
+
+          uiPromptInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              resolvePrompt(uiPromptInput.value);
+            }
+
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              resolvePrompt(null);
+            }
+          });
+
+          rows.forEach((row) => {
             row.addEventListener('mousedown', (event) => {
               if (event.button !== 0 || event.target.closest('a, input, button')) {
                 return;
               }
 
               pointerSelecting = true;
-              pointerMode = event.ctrlKey || event.metaKey ? !check.checked : true;
+              pointerMode = event.ctrlKey || event.metaKey ? !selectedPaths.has(row.dataset.filePath || '') : true;
               applyRowSelection(row, event);
             });
 
@@ -629,9 +697,7 @@ public static class PageRenderer
               setRowSelected(row, pointerMode);
               updateSelectedFiles();
             });
-          });
 
-          rows.forEach((row) => {
             row.addEventListener('dragstart', (event) => {
               beginMoveDrag(event, row.dataset.filePath || '', row.dataset.entryKind || 'file');
             });
@@ -641,25 +707,9 @@ public static class PageRenderer
             });
           });
 
-          gridChecks.forEach((check) => {
-            const card = check.closest('.file-card');
+          cards.forEach((card) => {
             const row = getRowForCard(card);
 
-            check.addEventListener('click', (event) => {
-              event.stopPropagation();
-            });
-
-            check.addEventListener('change', () => {
-              if (!row) {
-                return;
-              }
-
-              setRowSelected(row, check.checked);
-              updateSelectedFiles();
-            });
-          });
-
-          cards.forEach((card) => {
             card.addEventListener('dragstart', (event) => {
               beginMoveDrag(event, card.dataset.filePath || '', card.dataset.entryKind || 'file');
             });
@@ -673,19 +723,12 @@ public static class PageRenderer
                 return;
               }
 
-              const row = getRowForCard(card);
-
               if (!row) {
                 return;
               }
 
-              const check = row.querySelector('.file-check');
-              if (!check) {
-                return;
-              }
-
               pointerSelecting = true;
-              pointerMode = event.ctrlKey || event.metaKey ? !check.checked : true;
+              pointerMode = event.ctrlKey || event.metaKey ? !selectedPaths.has(row.dataset.filePath || '') : true;
               applyRowSelection(row, event);
             });
 
@@ -693,8 +736,6 @@ public static class PageRenderer
               if (!pointerSelecting) {
                 return;
               }
-
-              const row = getRowForCard(card);
 
               if (!row) {
                 return;
@@ -713,18 +754,17 @@ public static class PageRenderer
           rows.forEach((row) => {
             row.addEventListener('contextmenu', (event) => {
               event.preventDefault();
-              const check = row.querySelector('.file-check');
 
-              if (check && !check.checked) {
-                fileChecks.forEach((item) => {
-                  setRowSelected(item.closest('tr'), false);
-                });
+              if (event.ctrlKey || event.metaKey || event.shiftKey) {
+                applyRowSelection(row, event);
+              } else if (!selectedPaths.has(row.dataset.filePath || '')) {
+                clearSelection();
                 setRowSelected(row, true);
                 selectionAnchor = row;
                 updateSelectedFiles();
               }
 
-              showContextMenu(event.clientX, event.clientY);
+              showContextMenu(event.clientX, event.clientY, row.dataset.filePath || '', row.dataset.entryKind || '');
             });
           });
 
@@ -732,16 +772,17 @@ public static class PageRenderer
             card.addEventListener('contextmenu', (event) => {
               event.preventDefault();
               const row = getRowForCard(card);
-              const check = row?.querySelector('.file-check');
 
-              if (row && check && !check.checked) {
+              if (row && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+                applyRowSelection(row, event);
+              } else if (row && !selectedPaths.has(row.dataset.filePath || '')) {
                 clearSelection();
                 setRowSelected(row, true);
                 selectionAnchor = row;
                 updateSelectedFiles();
               }
 
-              showContextMenu(event.clientX, event.clientY);
+              showContextMenu(event.clientX, event.clientY, card.dataset.filePath || '', card.dataset.entryKind || '');
             });
           });
 
@@ -787,8 +828,16 @@ public static class PageRenderer
             filesPanel.classList.remove('is-dragging');
             hideContextMenu();
 
+            const transferItems = Array.from(event.dataTransfer.items || []);
+            const transferFiles = Array.from(event.dataTransfer.files || []);
             const droppedFiles = await getDroppedFileItems(event.dataTransfer);
-            await uploadFileItems(droppedFiles);
+            info.textContent = 'Drop debug: items=' + transferItems.length + ', files=' + transferFiles.length + ', collected=' + droppedFiles.length + '.';
+            await uploadFileItems(droppedFiles, {
+              source: 'drop',
+              items: transferItems.length,
+              files: transferFiles.length,
+              collected: droppedFiles.length
+            });
           });
 
           filesPanel.addEventListener('contextmenu', (event) => {
@@ -848,12 +897,27 @@ public static class PageRenderer
               return;
             }
 
+            if (action === 'move-selected-here') {
+              await moveSelectedToFolder(contextMenuTargetPath);
+              return;
+            }
+
             if (action === 'move-trash') {
               await moveSelectedToTrash();
+              return;
+            }
+
+            if (action === 'restore-trash') {
+              await restoreSelectedFromTrash();
+              return;
+            }
+
+            if (action === 'delete-forever') {
+              await deleteSelectedForever();
             }
           });
 
-          async function uploadFileItems(items) {
+          async function uploadFileItems(items, diagnostics = {}) {
             const uploadItems = items.filter((item) => item.file);
 
             if (!uploadItems.length) {
@@ -861,36 +925,39 @@ public static class PageRenderer
               return;
             }
 
-            let lastResponse = '';
+            const data = new FormData();
+            data.append('currentPath', currentPath.value);
+            data.append('uploadSource', diagnostics.source || 'unknown');
+            data.append('clientItemCount', String(diagnostics.items ?? uploadItems.length));
+            data.append('clientFileCount', String(diagnostics.files ?? uploadItems.length));
+            data.append('clientCollectedCount', String(diagnostics.collected ?? uploadItems.length));
+
+            for (const item of uploadItems) {
+              data.append('file', item.file, item.path || item.file.name);
+            }
 
             try {
-              for (let index = 0; index < uploadItems.length; index += 1) {
-                const item = uploadItems[index];
-                const data = new FormData();
-                data.append('file', item.file, item.path || item.file.name);
-                data.append('currentPath', currentPath.value);
-                lastResponse = await uploadOne(data, item, index, uploadItems.length);
-              }
+              const response = await uploadFiles(data, uploadItems);
 
               input.value = '';
               folderInput.value = '';
               document.open();
-              document.write(lastResponse);
+              document.write(response);
               document.close();
             } catch {
               info.textContent = 'Upload failed.';
             }
           }
 
-          function uploadOne(data, item, index, total) {
+          function uploadFiles(data, items) {
             return new Promise((resolve, reject) => {
               const startedAt = Date.now();
               const request = new XMLHttpRequest();
-              const prefix = total > 1 ? (index + 1) + '/' + total + ' - ' : '';
+              const label = items.length === 1 ? items[0].path : items.length + ' files';
 
               request.upload.addEventListener('progress', (event) => {
                 if (!event.lengthComputable) {
-                  info.textContent = prefix + 'Uploading ' + item.path + '...';
+                  info.textContent = 'Uploading ' + label + '...';
                   return;
                 }
 
@@ -898,17 +965,22 @@ public static class PageRenderer
                 const seconds = Math.max((Date.now() - startedAt) / 1000, 0.1);
                 const speed = event.loaded / seconds;
                 bar.style.width = percent + '%';
-                info.textContent = prefix + percent + '% - ' + formatBytes(speed) + '/s';
+                info.textContent = percent + '% - ' + formatBytes(speed) + '/s';
               });
 
               request.addEventListener('load', () => {
-                resolve(request.responseText);
+                if (request.status >= 200 && request.status < 300) {
+                  resolve(request.responseText);
+                  return;
+                }
+
+                reject();
               });
 
               request.addEventListener('error', reject);
               request.open('POST', '/files/upload');
               bar.style.width = '0%';
-              info.textContent = prefix + 'Starting ' + item.path + '...';
+              info.textContent = 'Starting ' + label + '...';
               request.send(data);
             });
           }
@@ -943,7 +1015,25 @@ public static class PageRenderer
 
           async function getDroppedFileItems(dataTransfer) {
             const transferItems = Array.from(dataTransfer.items || []);
+            const transferFiles = Array.from(dataTransfer.files || []);
             const collected = [];
+            const seen = new Set();
+
+            const addCollected = (file, path) => {
+              if (!file) {
+                return;
+              }
+
+              const normalizedPath = (path || file.webkitRelativePath || file.name || '').trim();
+              const key = normalizedPath + '|' + file.size + '|' + file.lastModified;
+
+              if (seen.has(key)) {
+                return;
+              }
+
+              seen.add(key);
+              collected.push({ file, path: normalizedPath || file.name });
+            };
 
             if (transferItems.length && transferItems.some((item) => item.webkitGetAsEntry)) {
               for (const item of transferItems) {
@@ -954,23 +1044,23 @@ public static class PageRenderer
                 const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
 
                 if (entry) {
-                  await collectEntry(entry, '', collected);
+                  await collectEntry(entry, '', addCollected);
                 }
-              }
-
-              if (collected.length) {
-                return collected;
               }
             }
 
-            return fileItemsFromList(dataTransfer.files || []);
+            for (const file of transferFiles) {
+              addCollected(file, file.webkitRelativePath || file.name);
+            }
+
+            return collected.length ? collected : fileItemsFromList(transferFiles);
           }
 
-          function collectEntry(entry, prefix, collected) {
+          function collectEntry(entry, prefix, addCollected) {
             return new Promise((resolve) => {
               if (entry.isFile) {
                 entry.file((file) => {
-                  collected.push({ file, path: prefix + file.name });
+                  addCollected(file, prefix + file.name);
                   resolve();
                 }, resolve);
                 return;
@@ -991,7 +1081,7 @@ public static class PageRenderer
                   }
 
                   for (const child of entries) {
-                    await collectEntry(child, prefix + entry.name + '/', collected);
+                    await collectEntry(child, prefix + entry.name + '/', addCollected);
                   }
 
                   readBatch();
@@ -1003,7 +1093,7 @@ public static class PageRenderer
           }
 
           async function createRemoteItem(endpoint, fieldName, promptText) {
-            const rawName = prompt(promptText);
+            const rawName = await askText(promptText);
 
             if (rawName === null) {
               return;
@@ -1052,7 +1142,13 @@ public static class PageRenderer
             return files.length + ' files selected.';
           }
 
-          function showContextMenu(x, y) {
+          function showContextMenu(x, y, targetPath = '', targetKind = '') {
+            contextMenuTargetPath = targetPath;
+            contextMenuTargetKind = targetKind;
+            if (contextMenuMoveHere) {
+              contextMenuMoveHere.hidden = targetKind !== 'folder' || !targetPath || selectedPaths.size === 0;
+            }
+
             contextMenu.hidden = false;
             const rect = contextMenu.getBoundingClientRect();
             const left = Math.min(x, window.innerWidth - rect.width - 10);
@@ -1063,16 +1159,15 @@ public static class PageRenderer
 
           function hideContextMenu() {
             contextMenu.hidden = true;
+            contextMenuTargetPath = '';
+            contextMenuTargetKind = '';
+            if (contextMenuMoveHere) {
+              contextMenuMoveHere.hidden = true;
+            }
           }
 
           function updateSelectedFiles() {
-            const selected = fileChecks.filter((check) => check.checked && !check.disabled).length;
-
-            if (selectAllFiles) {
-              const enabled = fileChecks.filter((check) => !check.disabled && !check.closest('tr').hidden);
-              selectAllFiles.checked = enabled.length > 0 && enabled.every((check) => check.checked);
-              selectAllFiles.indeterminate = selected > 0 && !selectAllFiles.checked;
-            }
+            return selectedPaths.size;
           }
 
           function getRowForCard(card) {
@@ -1080,7 +1175,7 @@ public static class PageRenderer
               return null;
             }
 
-            return rows.find((row) => row.dataset.fileName === card.dataset.fileName) || null;
+            return rowsByPath.get(card.dataset.filePath || '') || null;
           }
 
           function getCardForRow(row) {
@@ -1088,13 +1183,13 @@ public static class PageRenderer
               return null;
             }
 
-            return cards.find((card) => card.dataset.fileName === row.dataset.fileName) || null;
+            return cardsByPath.get(row.dataset.filePath || '') || null;
           }
 
           function applyRowSelection(row, event) {
-            const check = row.querySelector('.file-check');
+            const path = row.dataset.filePath || '';
 
-            if (!check || check.disabled) {
+            if (!path) {
               return;
             }
 
@@ -1108,13 +1203,13 @@ public static class PageRenderer
               clearSelection();
             }
 
-            setRowSelected(row, event.ctrlKey || event.metaKey ? !check.checked : true);
+            setRowSelected(row, event.ctrlKey || event.metaKey ? !selectedPaths.has(path) : true);
             selectionAnchor = row;
             updateSelectedFiles();
           }
 
           function selectRange(fromRow, toRow) {
-            const visibleRows = rows.filter((row) => !row.hidden && row.querySelector('.file-check'));
+            const visibleRows = rows.filter((row) => !row.hidden && row.dataset.filePath);
             const from = visibleRows.indexOf(fromRow);
             const to = visibleRows.indexOf(toRow);
 
@@ -1132,30 +1227,32 @@ public static class PageRenderer
           }
 
           function clearSelection() {
-            fileChecks.forEach((check) => {
-              setRowSelected(check.closest('tr'), false);
-            });
+            [...selectedPaths].forEach((path) => setRowSelected(rowsByPath.get(path) || null, false));
           }
 
           function setRowSelected(row, selected) {
-            const check = row.querySelector('.file-check');
-
-            if (!check || check.disabled) {
+            if (!row) {
               return;
             }
 
-            check.checked = selected;
+            const path = row.dataset.filePath || '';
+
+            if (!path) {
+              return;
+            }
+
+            if (selected) {
+              selectedPaths.add(path);
+            } else {
+              selectedPaths.delete(path);
+            }
+
             row.classList.toggle('is-selected', selected);
 
             const card = getCardForRow(row);
 
             if (card) {
-              const gridCheck = card.querySelector('.grid-file-check');
               card.classList.toggle('is-selected', selected);
-
-              if (gridCheck) {
-                gridCheck.checked = selected;
-              }
             }
           }
 
@@ -1188,7 +1285,7 @@ public static class PageRenderer
               return;
             }
 
-            if (!confirm('Move selected file(s) to trash?')) {
+            if (!await askConfirm('Move selected file(s) to trash?')) {
               return;
             }
 
@@ -1211,10 +1308,115 @@ public static class PageRenderer
             }
           }
 
+          async function moveSelectedToFolder(destinationPath) {
+            const paths = getSelectedPaths();
+
+            if (!paths.length) {
+              info.textContent = 'Select files first.';
+              return;
+            }
+
+            if (!destinationPath) {
+              info.textContent = 'Choose a destination folder.';
+              return;
+            }
+
+            if (!await askConfirm('Move selected file(s) to this folder?')) {
+              return;
+            }
+
+            await moveDraggedFiles(paths, destinationPath);
+          }
+
+          async function emptyTrash() {
+            if (!await askConfirm('Empty the entire trash? This cannot be undone.')) {
+              return;
+            }
+
+            try {
+              const data = new URLSearchParams();
+              data.set('currentPath', currentPath.value);
+
+              const response = await fetch('/files/trash/empty', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: data.toString()
+              });
+              const html = await response.text();
+              document.open();
+              document.write(html);
+              document.close();
+            } catch {
+              info.textContent = 'Could not empty trash.';
+            }
+          }
+
+          async function restoreSelectedFromTrash() {
+            const paths = getSelectedPaths();
+
+            if (!paths.length) {
+              info.textContent = 'Select files first.';
+              return;
+            }
+
+            const uniquePaths = [...new Set(paths)];
+
+            if (!await askConfirm('Restore selected file(s) from trash?')) {
+              return;
+            }
+
+            try {
+              const result = await submitTrashActionRequest('/files/trash/restore', uniquePaths);
+
+              if (result.conflict) {
+                if (!await askConfirm('That destination already exists. Replace selected item(s)?')) {
+                  document.open();
+                  document.write(result.html);
+                  document.close();
+                  return;
+                }
+
+                const replaced = await submitTrashActionRequest('/files/trash/restore', uniquePaths, { overwriteExisting: 'true' });
+                document.open();
+                document.write(replaced.html);
+                document.close();
+                return;
+              }
+
+              document.open();
+              document.write(result.html);
+              document.close();
+            } catch {
+              info.textContent = 'Could not restore files from trash.';
+            }
+          }
+
+          async function deleteSelectedForever() {
+            const paths = getSelectedPaths();
+
+            if (!paths.length) {
+              info.textContent = 'Select files first.';
+              return;
+            }
+
+            const uniquePaths = [...new Set(paths)];
+
+            if (!await askConfirm('Delete selected file(s) forever? This cannot be undone.')) {
+              return;
+            }
+
+            try {
+              const result = await submitTrashActionRequest('/files/trash/delete', uniquePaths);
+              document.open();
+              document.write(result.html);
+              document.close();
+            } catch {
+              info.textContent = 'Could not delete files forever.';
+            }
+          }
+
           function getSelectedPaths() {
-            return fileChecks
-              .filter((check) => check.checked && !check.disabled)
-              .map((check) => check.value);
+            return [...selectedPaths];
           }
 
           function hasMoveDrag(dataTransfer) {
@@ -1294,54 +1496,25 @@ public static class PageRenderer
             }
 
             try {
-              const html = await submitMoveRequest(uniquePaths, destinationPath || '');
-              const conflict = /already contains a file or folder with the same name|already exists/i.test(html);
+              const result = await submitMoveRequest(uniquePaths, destinationPath || '');
 
-              if (conflict) {
-                if (uniquePaths.length === 1) {
-                  const replaceExisting = confirm('That name already exists. OK = replace it, Cancel = rename it.');
-
-                  if (replaceExisting) {
-                    const replacedHtml = await submitMoveRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
-                    document.open();
-                    document.write(replacedHtml);
-                    document.close();
-                    return;
-                  }
-
-                  const sourceName = uniquePaths[0].split('/').pop() || uniquePaths[0];
-                  const renamed = prompt('New name', sourceName);
-
-                  if (renamed && renamed.trim()) {
-                    const renamedHtml = await submitMoveRequest(uniquePaths, destinationPath || '', { newName: renamed.trim() });
-                    document.open();
-                    document.write(renamedHtml);
-                    document.close();
-                    return;
-                  }
-
+              if (result.conflict) {
+                if (!await askConfirm('That destination already exists. Replace selected item(s)?')) {
                   document.open();
-                  document.write(html);
+                  document.write(result.html);
                   document.close();
                   return;
                 }
 
-                if (!confirm('That destination already exists. OK = replace selected items, Cancel = skip.')) {
-                  document.open();
-                  document.write(html);
-                  document.close();
-                  return;
-                }
-
-                const replacedHtml = await submitMoveRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
+                const replaced = await submitMoveRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
                 document.open();
-                document.write(replacedHtml);
+                document.write(replaced.html);
                 document.close();
                 return;
               }
 
               document.open();
-              document.write(html);
+              document.write(result.html);
               document.close();
             } catch {
               info.textContent = 'Could not move files.';
@@ -1366,7 +1539,81 @@ public static class PageRenderer
               body: data.toString()
             });
 
-            return response.text();
+            return {
+              html: await response.text(),
+              conflict: response.headers.get('X-Conflict') === 'true'
+            };
+          }
+
+          async function submitTrashActionRequest(endpoint, paths, extraFields = {}) {
+            const data = new URLSearchParams();
+            data.set('paths', paths.join('\n'));
+            data.set('currentPath', currentPath.value);
+
+            Object.entries(extraFields).forEach(([key, value]) => {
+              data.set(key, value);
+            });
+
+            info.textContent = 'Processing...';
+
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: data.toString()
+            });
+
+            return {
+              html: await response.text(),
+              conflict: response.headers.get('X-Conflict') === 'true'
+            };
+          }
+
+          function askConfirm(message) {
+            uiConfirmText.textContent = message;
+            uiConfirm.hidden = false;
+            uiConfirmOk.focus();
+
+            return new Promise((resolve) => {
+              confirmResolver = resolve;
+            });
+          }
+
+          function resolveConfirm(value) {
+            if (!confirmResolver) {
+              uiConfirm.hidden = true;
+              return;
+            }
+
+            const resolve = confirmResolver;
+            confirmResolver = null;
+            uiConfirm.hidden = true;
+            resolve(value);
+          }
+
+          function askText(message, defaultValue = '') {
+            uiPromptText.textContent = message;
+            uiPromptInput.value = defaultValue;
+            uiPrompt.hidden = false;
+            window.setTimeout(() => {
+              uiPromptInput.focus();
+              uiPromptInput.select();
+            }, 0);
+
+            return new Promise((resolve) => {
+              promptResolver = resolve;
+            });
+          }
+
+          function resolvePrompt(value) {
+            if (!promptResolver) {
+              uiPrompt.hidden = true;
+              return;
+            }
+
+            const resolve = promptResolver;
+            promptResolver = null;
+            uiPrompt.hidden = true;
+            resolve(value);
           }
 
           function sortRows() {
@@ -1406,9 +1653,12 @@ public static class PageRenderer
           function setFileView(mode) {
             fileViewMode = mode === 'grid' ? 'grid' : 'list';
             filesPanel.classList.toggle('is-grid-view', fileViewMode === 'grid');
+            filesTable.style.display = fileViewMode === 'grid' ? 'none' : '';
+            filesGrid.style.display = fileViewMode === 'grid' ? 'grid' : 'none';
             localStorage.setItem('skyvaultFileView', fileViewMode);
             viewButtons.forEach((button) => {
               button.classList.toggle('active', button.dataset.viewMode === fileViewMode);
+              button.setAttribute('aria-pressed', String(button.dataset.viewMode === fileViewMode));
             });
           }
 
@@ -1434,9 +1684,6 @@ public static class PageRenderer
         string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
         string encodedPath = WebUtility.UrlEncode(file.Name);
         string draggableAttr = " draggable=\"true\"";
-        string checkbox = file.IsFolder
-            ? "<input type=\"checkbox\" disabled aria-label=\"Folders cannot be downloaded yet\">"
-            : $"<input class=\"file-check\" type=\"checkbox\" value=\"{Escape(file.Name)}\" aria-label=\"Select {Escape(displayName)}\">";
         string nameContent = allowOpen
             ? file.IsFolder
                 ? $"<a href=\"/?path={encodedPath}\">{Escape(displayName)}</a>"
@@ -1449,7 +1696,6 @@ public static class PageRenderer
 
         return $$"""
         <tr{{uploadedClass}}{{draggableAttr}} data-file-path="{{Escape(file.Name)}}" data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
-          <td class="select-column">{{checkbox}}</td>
           <td>
             <span class="file-name">
               <span class="{{iconClass}}"></span>
@@ -1470,9 +1716,6 @@ public static class PageRenderer
         string href = file.IsFolder ? $"/?path={encodedPath}" : $"/files/open?path={encodedPath}";
         string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
         string draggableAttr = " draggable=\"true\"";
-        string checkbox = file.IsFolder
-            ? ""
-            : $"<input class=\"grid-file-check\" type=\"checkbox\" aria-label=\"Select {Escape(displayName)}\">";
         string content = allowOpen
             ? $"""<a class="file-card-link" href="{href}">{Escape(displayName)}</a>"""
             : $"""<span class="file-card-link">{Escape(displayName)}</span>""";
@@ -1482,7 +1725,6 @@ public static class PageRenderer
         <div class="file-card"{{draggableAttr}} data-file-path="{{Escape(file.Name)}}" data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
           <div class="file-card-preview">
             <span class="{{iconClass}}"></span>
-            {{checkbox}}
           </div>
           <div class="file-card-body">
             {{content}}
@@ -1580,6 +1822,25 @@ public static class PageRenderer
             .ToList();
     }
 
+        private static IReadOnlyList<FileEntry> AddTrashFolderIfNeeded(
+          IReadOnlyList<FileEntry> entries,
+          IReadOnlyList<FileEntry> trashFiles,
+          string currentDirectory)
+        {
+          if (currentDirectory.Length != 0)
+          {
+            return entries;
+          }
+
+          DateTimeOffset modifiedAt = trashFiles.Count > 0
+            ? trashFiles.Max(entry => entry.ModifiedAt)
+            : DateTimeOffset.UtcNow;
+
+          var list = entries.ToList();
+          list.Insert(0, new FileEntry(".trash", 0, modifiedAt, true));
+          return list;
+        }
+
     private static IReadOnlyList<FileEntry> GetVisibleFiles(IReadOnlyList<FileEntry> files, IReadOnlyList<FileEntry> trashFiles, string currentDirectory, string currentView)
     {
         currentView = NormalizeView(currentView);
@@ -1604,7 +1865,7 @@ public static class PageRenderer
                 .OrderByDescending(file => file.ModifiedAt)
                 .ThenBy(file => file.Name)
                 .ToList(),
-            _ => GetDirectoryEntries(files, currentDirectory)
+            _ => AddTrashFolderIfNeeded(GetDirectoryEntries(files, currentDirectory), trashFiles, currentDirectory)
         };
     }
 
@@ -2549,6 +2810,64 @@ public static class PageRenderer
               width: 100%;
             }
 
+            .file-actions-right {
+              display: flex;
+              align-items: center;
+              gap: 10px;
+            }
+
+            .trash-empty-button {
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              min-height: 34px;
+              margin: 0;
+              padding: 0 12px;
+              border: 1px solid #fecaca;
+              border-radius: 8px;
+              background: #dc2626;
+              color: #ffffff;
+              box-shadow: none;
+              font-weight: 800;
+            }
+
+            .trash-empty-button:hover {
+              background: #b91c1c;
+            }
+
+            .trash-empty-button .context-icon {
+              color: currentColor;
+            }
+
+            .trash-actions {
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+            }
+
+            .trash-actions button {
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              min-height: 34px;
+              margin: 0;
+              padding: 0 10px;
+              border: 0;
+              border-radius: 6px;
+              background: transparent;
+              color: #334155;
+              box-shadow: none;
+              font-weight: 700;
+            }
+
+            .trash-actions button:hover {
+              background: #eef4ff;
+            }
+
+            .trash-actions button:last-child {
+              color: #991b1b;
+            }
+
             .view-switch {
               display: inline-flex;
               align-items: center;
@@ -2767,16 +3086,6 @@ public static class PageRenderer
               background: #cfe1ff;
             }
 
-            .grid-file-check {
-              position: absolute;
-              left: 9px;
-              top: 9px;
-              width: 16px;
-              height: 16px;
-              margin: 0;
-              padding: 0;
-            }
-
             .grid-file-icon {
               width: 42px;
               height: 50px;
@@ -2968,6 +3277,57 @@ public static class PageRenderer
               background: #dbeafe;
             }
 
+            .ui-confirm {
+              position: fixed;
+              inset: 0;
+              z-index: 40;
+              display: grid;
+              place-items: center;
+              padding: 24px;
+              background: rgba(15, 23, 42, 0.28);
+            }
+
+            .ui-confirm[hidden] {
+              display: none;
+            }
+
+            .ui-confirm-panel {
+              width: min(420px, 100%);
+              display: grid;
+              gap: 14px;
+              padding: 18px;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface);
+              box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
+            }
+
+            .ui-confirm-panel p {
+              margin: 0;
+              color: var(--muted);
+              font-weight: 700;
+            }
+
+            .ui-confirm-panel input {
+              margin: 0;
+            }
+
+            .ui-confirm-actions {
+              display: flex;
+              justify-content: flex-end;
+              gap: 10px;
+            }
+
+            .ui-confirm-actions button {
+              min-width: 88px;
+              margin-top: 0;
+            }
+
+            .ui-confirm-actions button:not(.primary) {
+              background: #eef2f7;
+              color: var(--text);
+            }
+
             .context-menu {
               position: fixed;
               z-index: 20;
@@ -3004,12 +3364,110 @@ public static class PageRenderer
               color: #991b1b;
             }
 
+            .context-menu button[data-action="move-selected-here"] {
+              color: #1d4ed8;
+            }
+
+            .context-menu button[data-action="delete-forever"] {
+              color: #991b1b;
+            }
+
+            .context-menu button[data-action="restore-trash"] {
+              color: #166534;
+            }
+
             .context-icon {
               position: relative;
               display: inline-block;
               width: 18px;
               height: 18px;
               color: #2563eb;
+            }
+
+            .move-here-icon {
+              color: #1d4ed8;
+            }
+
+            .move-here-icon::before,
+            .move-here-icon::after {
+              content: "";
+              position: absolute;
+            }
+
+            .move-here-icon::before {
+              left: 2px;
+              top: 4px;
+              width: 10px;
+              height: 10px;
+              border: 2px solid currentColor;
+              border-radius: 2px;
+            }
+
+            .move-here-icon::after {
+              right: 0;
+              top: 7px;
+              width: 8px;
+              height: 2px;
+              background: currentColor;
+              box-shadow: -2px -2px 0 0 currentColor, -2px 2px 0 0 currentColor;
+            }
+
+            .restore-icon {
+              color: #166534;
+            }
+
+            .restore-icon::before,
+            .delete-forever-icon::before,
+            .delete-forever-icon::after {
+              content: "";
+              position: absolute;
+            }
+
+            .restore-icon::before {
+              left: 3px;
+              top: 5px;
+              width: 8px;
+              height: 8px;
+              border-left: 2px solid currentColor;
+              border-bottom: 2px solid currentColor;
+              transform: rotate(45deg);
+            }
+
+            .restore-icon::after {
+              content: "";
+              position: absolute;
+              left: 7px;
+              top: 3px;
+              width: 8px;
+              height: 2px;
+              background: currentColor;
+              box-shadow: 0 4px 0 currentColor;
+            }
+
+            .delete-forever-icon {
+              color: #991b1b;
+            }
+
+            .delete-forever-icon::before {
+              left: 4px;
+              top: 3px;
+              width: 10px;
+              height: 12px;
+              border: 2px solid currentColor;
+              border-top: 0;
+              border-radius: 0 0 3px 3px;
+            }
+
+            .delete-forever-icon::after {
+              left: 2px;
+              top: 1px;
+              width: 14px;
+              height: 2px;
+              background: currentColor;
+              border-radius: 1px;
+              box-shadow:
+                3px 0 0 0 currentColor,
+                6px 0 0 0 currentColor;
             }
 
             .upload-file-icon,

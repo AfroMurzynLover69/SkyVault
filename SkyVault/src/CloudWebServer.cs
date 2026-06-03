@@ -187,12 +187,8 @@ public sealed class CloudWebServer
             string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
             string newName = request.Form.GetValueOrDefault("newName", "");
-            (int moved, int skippedExisting) = await fileStorage.MoveFilesAsync(email, selectedFiles, destinationDirectory, overwriteExisting, newName);
-            string message = moved == 0
-                ? (skippedExisting > 0 ? "That destination already contains a file or folder with the same name." : "Select files first.")
-                : skippedExisting > 0
-                    ? $"Moved {moved} file(s). {skippedExisting} item(s) were skipped because the target already exists."
-                    : $"Moved {moved} file(s).";
+            (int moved, int skippedExisting, int missing) = await fileStorage.MoveFilesAsync(email, selectedFiles, destinationDirectory, overwriteExisting, newName);
+            string message = BuildMoveMessage(moved, skippedExisting, missing);
 
             if (moved == 0 && skippedExisting > 0)
             {
@@ -207,7 +203,19 @@ public sealed class CloudWebServer
                 AppLog.Info($"Move completed for {email}: {moved} item(s) to {destinationDirectory}");
             }
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            if (missing > 0)
+            {
+                AppLog.Warn($"Move skipped missing items for {email}: {missing} item(s)");
+            }
+
+            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+
+            if (!overwriteExisting && skippedExisting > 0)
+            {
+                response.Headers["X-Conflict"] = "true";
+            }
+
+            return response;
         }
 
         if (request.Method == "POST" && request.Path == "/files/trash")
@@ -232,6 +240,94 @@ public sealed class CloudWebServer
             }
 
             return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+        }
+
+        if (request.Method == "POST" && request.Path == "/files/trash/restore")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
+            (int restored, int skippedExisting, int missing) = await fileStorage.RestoreFromTrashAsync(email, selectedFiles, overwriteExisting);
+            string message = BuildRestoreMessage(restored, skippedExisting, missing);
+
+            if (restored == 0 && skippedExisting > 0)
+            {
+                AppLog.Warn($"Restore blocked by existing destination for {email}");
+            }
+            else if (restored > 0 && skippedExisting > 0)
+            {
+                AppLog.Warn($"Restore completed with conflicts for {email}: {restored} restored, {skippedExisting} skipped");
+            }
+            else if (restored > 0)
+            {
+                AppLog.Info($"Restored {restored} item(s) from trash for {email}");
+            }
+
+            if (missing > 0)
+            {
+                AppLog.Warn($"Restore skipped missing trash items for {email}: {missing} item(s)");
+            }
+
+            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email)));
+
+            if (!overwriteExisting && skippedExisting > 0)
+            {
+                response.Headers["X-Conflict"] = "true";
+            }
+
+            return response;
+        }
+
+        if (request.Method == "POST" && request.Path == "/files/trash/delete")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            int deleted = await fileStorage.DeleteFromTrashAsync(email, selectedFiles);
+            string message = deleted == 0 ? "Select files first." : $"Deleted {deleted} file(s) forever.";
+
+            if (deleted == 0)
+            {
+                AppLog.Warn($"Permanent delete requested without selected files for {email}");
+            }
+            else
+            {
+                AppLog.Info($"Permanently deleted {deleted} item(s) from trash for {email}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email)));
+        }
+
+        if (request.Method == "POST" && request.Path == "/files/trash/empty")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            int emptied = await fileStorage.EmptyTrashAsync(email);
+            string message = emptied == 0 ? "Trash is already empty." : "Trash emptied.";
+
+            if (emptied == 0)
+            {
+                AppLog.Warn($"Empty trash requested but trash was already empty for {email}");
+            }
+            else
+            {
+                AppLog.Info($"Emptied trash for {email}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/forgot-password")
@@ -391,30 +487,62 @@ public sealed class CloudWebServer
                 return Redirect("/");
             }
 
-            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
-            MultipartFile? file = request.GetUploadedFile("file");
+            string currentDirectory = NormalizeCloudPath(
+                request.GetMultipartField("currentPath")
+                ?? request.Form.GetValueOrDefault("currentPath", ""));
+            string uploadSource = request.GetMultipartField("uploadSource") ?? "unknown";
+            int clientItemCount = ParseMultipartInt(request, "clientItemCount", -1);
+            int clientFileCount = ParseMultipartInt(request, "clientFileCount", -1);
+            int clientCollectedCount = ParseMultipartInt(request, "clientCollectedCount", -1);
+            IReadOnlyList<MultipartFile> files = request.GetUploadedFiles("file");
+            AppLog.Info($"Upload request in '{currentDirectory}' from {uploadSource} contains {files.Count} file part(s); client items={clientItemCount}, files={clientFileCount}, collected={clientCollectedCount}: {string.Join(", ", files.Select(file => file.FileName))}");
 
-            if (file is null)
+            if (files.Count == 0)
             {
                 AppLog.Warn($"Upload attempted without a file in {currentDirectory}");
                 return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Choose a file first.", currentDirectory));
             }
 
-            string uploadPath = CombineCloudPath(currentDirectory, file.FileName);
-            FileCreateResult result = await fileStorage.SaveUploadedFileAsync(email, file with { FileName = uploadPath });
+            int uploaded = 0;
+            int invalid = 0;
+            int quotaExceeded = 0;
+            int failed = 0;
 
-            string message = result switch
+            foreach (MultipartFile file in files)
             {
-                FileCreateResult.Created => "File uploaded.",
-                FileCreateResult.InvalidFileName => "File name is invalid.",
-                FileCreateResult.QuotaExceeded => "File is too large for your remaining space.",
-                _ => "Could not upload file."
-            };
+                string uploadPath = CombineCloudPath(currentDirectory, file.FileName);
+                FileCreateResult result = await fileStorage.SaveUploadedFileAsync(email, file with { FileName = uploadPath });
 
-            if (result != FileCreateResult.Created)
-            {
-                AppLog.Warn($"Upload failed for {uploadPath}: {message}");
+                switch (result)
+                {
+                    case FileCreateResult.Created:
+                        uploaded += 1;
+                        break;
+                    case FileCreateResult.InvalidFileName:
+                        invalid += 1;
+                        AppLog.Warn($"Upload failed for {uploadPath}: invalid name");
+                        break;
+                    case FileCreateResult.QuotaExceeded:
+                        quotaExceeded += 1;
+                        AppLog.Warn($"Upload failed for {uploadPath}: quota exceeded");
+                        break;
+                    default:
+                        failed += 1;
+                        AppLog.Warn($"Upload failed for {uploadPath}: unknown error");
+                        break;
+                }
             }
+
+            string message = BuildUploadSummary(
+                uploaded,
+                files.Count,
+                invalid,
+                quotaExceeded,
+                failed,
+                uploadSource,
+                clientItemCount,
+                clientFileCount,
+                clientCollectedCount);
 
             return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
         }
@@ -702,6 +830,103 @@ public sealed class CloudWebServer
         }
 
         return $"{normalizedDirectory}/{normalizedName}";
+    }
+
+    private static string BuildMoveMessage(int moved, int skippedExisting, int missing)
+    {
+        if (moved == 0 && skippedExisting > 0)
+        {
+            return "That destination already contains a file or folder with the same name.";
+        }
+
+        var parts = new List<string>();
+
+        if (moved > 0)
+        {
+            parts.Add($"Moved {moved} file(s).");
+        }
+
+        if (skippedExisting > 0)
+        {
+            parts.Add($"{skippedExisting} item(s) were skipped because the target already exists.");
+        }
+
+        if (missing > 0)
+        {
+            parts.Add($"{missing} item(s) were missing.");
+        }
+
+        return parts.Count == 0 ? "Select files first." : string.Join(' ', parts);
+    }
+
+    private static string BuildRestoreMessage(int restored, int skippedExisting, int missing)
+    {
+        if (restored == 0 && skippedExisting > 0)
+        {
+            return "That destination already contains a file or folder with the same name.";
+        }
+
+        var parts = new List<string>();
+
+        if (restored > 0)
+        {
+            parts.Add($"Restored {restored} file(s).");
+        }
+
+        if (skippedExisting > 0)
+        {
+            parts.Add($"{skippedExisting} item(s) were skipped because the target already exists.");
+        }
+
+        if (missing > 0)
+        {
+            parts.Add($"{missing} item(s) were missing from trash.");
+        }
+
+        return parts.Count == 0 ? "Select files first." : string.Join(' ', parts);
+    }
+
+    private static int ParseMultipartInt(HttpRequest request, string fieldName, int fallback)
+    {
+        return int.TryParse(request.GetMultipartField(fieldName), out int value) ? value : fallback;
+    }
+
+    private static string BuildUploadSummary(
+        int uploaded,
+        int total,
+        int invalid,
+        int quotaExceeded,
+        int failed,
+        string uploadSource,
+        int clientItemCount,
+        int clientFileCount,
+        int clientCollectedCount)
+    {
+        var parts = new List<string>();
+
+        parts.Add($"Uploaded {uploaded} of {total} received file(s).");
+
+        if (invalid > 0)
+        {
+            parts.Add($"{invalid} invalid name(s).");
+        }
+
+        if (quotaExceeded > 0)
+        {
+            parts.Add($"{quotaExceeded} over quota.");
+        }
+
+        if (failed > 0)
+        {
+            parts.Add($"{failed} failed.");
+        }
+
+        if (uploadSource == "drop")
+        {
+            parts.Add($"Drop debug: items={clientItemCount}, files={clientFileCount}, collected={clientCollectedCount}, server={total}.");
+        }
+
+        return parts.Count == 0 ? "Could not upload file." : string.Join(' ', parts);
     }
 }
 

@@ -112,60 +112,65 @@ public sealed class HttpRequest
 
     public MultipartFile? GetUploadedFile(string fieldName)
     {
-        if (!Headers.TryGetValue("Content-Type", out string? contentType)
-            || !contentType.StartsWith("multipart/form-data", StringComparison.OrdinalIgnoreCase))
+        return GetUploadedFiles(fieldName).FirstOrDefault();
+    }
+
+    public IReadOnlyList<MultipartFile> GetUploadedFiles(string fieldName)
+    {
+        if (!TryGetMultipartBoundary(out string boundary))
         {
-            return null;
+            return [];
         }
 
-        string? boundary = GetBoundary(contentType);
+        var files = new List<MultipartFile>();
 
-        if (boundary is null)
+        foreach (MultipartPart part in EnumerateMultipartParts(boundary))
         {
-            return null;
-        }
+            string? name = ExtractQuotedValue(part.HeaderText, "name");
 
-        string bodyText = Encoding.Latin1.GetString(Body);
-        string marker = "--" + boundary;
-        string[] parts = bodyText.Split(marker, StringSplitOptions.RemoveEmptyEntries);
-
-        foreach (string rawPart in parts)
-        {
-            if (rawPart.StartsWith("--", StringComparison.Ordinal))
+            if (!string.Equals(name, fieldName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            string part = rawPart.TrimStart('\r', '\n');
-            int headerEnd = part.IndexOf("\r\n\r\n", StringComparison.Ordinal);
-
-            if (headerEnd < 0)
-            {
-                continue;
-            }
-
-            string headerText = part[..headerEnd];
-            string dataText = part[(headerEnd + 4)..];
-
-            if (dataText.EndsWith("\r\n", StringComparison.Ordinal))
-            {
-                dataText = dataText[..^2];
-            }
-
-            if (!headerText.Contains("name=\"" + fieldName + "\"", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            string? fileName = ExtractQuotedValue(headerText, "filename");
+            string? fileName = ExtractQuotedValue(part.HeaderText, "filename");
 
             if (string.IsNullOrWhiteSpace(fileName))
             {
-                return null;
+                continue;
             }
 
-            byte[] content = Encoding.Latin1.GetBytes(dataText);
-            return new MultipartFile(fileName, content);
+            byte[] content = Encoding.Latin1.GetBytes(part.DataText);
+            files.Add(new MultipartFile(fileName, content));
+        }
+
+        return files;
+    }
+
+    public string? GetMultipartField(string fieldName)
+    {
+        if (!TryGetMultipartBoundary(out string boundary))
+        {
+            return null;
+        }
+
+        foreach (MultipartPart part in EnumerateMultipartParts(boundary))
+        {
+            string? name = ExtractQuotedValue(part.HeaderText, "name");
+
+            if (!string.Equals(name, fieldName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string? fileName = ExtractQuotedValue(part.HeaderText, "filename");
+
+            if (!string.IsNullOrWhiteSpace(fileName))
+            {
+                continue;
+            }
+
+            return Encoding.UTF8.GetString(Encoding.Latin1.GetBytes(part.DataText));
         }
 
         return null;
@@ -214,6 +219,60 @@ public sealed class HttpRequest
             && contentType.StartsWith("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool TryGetMultipartBoundary(out string boundary)
+    {
+        boundary = "";
+
+        if (!Headers.TryGetValue("Content-Type", out string? contentType)
+            || !contentType.StartsWith("multipart/form-data", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string? parsed = GetBoundary(contentType);
+
+        if (string.IsNullOrWhiteSpace(parsed))
+        {
+            return false;
+        }
+
+        boundary = parsed;
+        return true;
+    }
+
+    private IEnumerable<MultipartPart> EnumerateMultipartParts(string boundary)
+    {
+        string bodyText = Encoding.Latin1.GetString(Body);
+        string marker = "--" + boundary;
+        string[] parts = bodyText.Split(marker, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (string rawPart in parts)
+        {
+            if (rawPart.StartsWith("--", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string part = rawPart.TrimStart('\r', '\n');
+            int headerEnd = part.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+
+            if (headerEnd < 0)
+            {
+                continue;
+            }
+
+            string headerText = part[..headerEnd];
+            string dataText = part[(headerEnd + 4)..];
+
+            if (dataText.EndsWith("\r\n", StringComparison.Ordinal))
+            {
+                dataText = dataText[..^2];
+            }
+
+            yield return new MultipartPart(headerText, dataText);
+        }
+    }
+
     private static string? GetBoundary(string contentType)
     {
         foreach (string segment in contentType.Split(';'))
@@ -244,4 +303,6 @@ public sealed class HttpRequest
 
         return end < 0 ? null : text[start..end];
     }
+
+    private sealed record MultipartPart(string HeaderText, string DataText);
 }

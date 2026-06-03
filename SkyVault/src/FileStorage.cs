@@ -5,7 +5,9 @@ using System.Globalization;
 
 public sealed class FileStorage
 {
-    private const int MaxRelativePathLength = 240;
+    private const int MaxRelativePathLength = 1024;
+    private const int MaxFileNameLength = 255;
+    private static readonly TimeSpan TrashRetention = TimeSpan.FromDays(30);
     private readonly IReadOnlyList<string> rootPaths;
     private readonly string storageMode;
     private readonly UserStore userStore;
@@ -91,6 +93,7 @@ public sealed class FileStorage
         }
 
         username = NormalizeEmail(username);
+        PurgeExpiredTrash(username);
         Dictionary<string, FileEntry> entries = new(StringComparer.Ordinal);
 
         foreach (string directory in GetUserDirectories(username))
@@ -301,6 +304,7 @@ public sealed class FileStorage
     public async Task<int> MoveToTrashAsync(string username, IReadOnlyList<string> fileNames)
     {
         username = NormalizeEmail(username);
+        PurgeExpiredTrash(username);
         int moved = 0;
         string trashBatch = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
 
@@ -345,7 +349,163 @@ public sealed class FileStorage
         return moved;
     }
 
-    public Task<(int Moved, int SkippedExisting)> MoveFilesAsync(
+    public async Task<int> EmptyTrashAsync(string username)
+    {
+        username = NormalizeEmail(username);
+        PurgeExpiredTrash(username);
+        int deleted = 0;
+
+        foreach (string directory in GetUserDirectories(username))
+        {
+            string trashDirectory = Path.Combine(directory, ".trash");
+
+            if (!Directory.Exists(trashDirectory))
+            {
+                continue;
+            }
+
+            foreach (string batchDirectory in Directory.EnumerateDirectories(trashDirectory, "*", SearchOption.TopDirectoryOnly))
+            {
+                Directory.Delete(batchDirectory, true);
+                deleted += 1;
+            }
+        }
+
+        if (deleted > 0)
+        {
+            await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
+        }
+
+        return deleted;
+    }
+
+    public async Task<(int Moved, int SkippedExisting, int Missing)> RestoreFromTrashAsync(
+        string username,
+        IReadOnlyList<string> fileNames,
+        bool overwriteExisting = false)
+    {
+        username = NormalizeEmail(username);
+        PurgeExpiredTrash(username);
+        int restored = 0;
+        int skippedBecauseExists = 0;
+        int missingFromTrash = 0;
+        List<string> directories = GetUserDirectories(username).ToList();
+
+        foreach (string rawFileName in fileNames)
+        {
+            string relativePath = NormalizeRelativePath(rawFileName);
+
+            if (!TryParseTrashRelativePath(relativePath, out string sourceRelativePath, out string destinationRelativePath))
+            {
+                continue;
+            }
+
+            var sources = new List<(string Directory, string SourcePath)>();
+
+            foreach (string directory in directories)
+            {
+                string trashRoot = Path.Combine(directory, ".trash");
+                string sourcePath = GetSafeUserPath(trashRoot, sourceRelativePath);
+
+                if (File.Exists(sourcePath))
+                {
+                    sources.Add((directory, sourcePath));
+                }
+            }
+
+            if (sources.Count == 0)
+            {
+                missingFromTrash += 1;
+                continue;
+            }
+
+            if (PathExists(username, destinationRelativePath))
+            {
+                if (!overwriteExisting)
+                {
+                    skippedBecauseExists += 1;
+                    continue;
+                }
+
+                foreach ((string directory, _) in sources)
+                {
+                    DeletePathInDirectory(directory, destinationRelativePath);
+                }
+            }
+
+            bool restoredAnyReplica = false;
+            DateTime sourceModifiedAt = File.GetLastWriteTimeUtc(sources[0].SourcePath);
+
+            foreach ((string directory, string sourcePath) in sources)
+            {
+                string destinationPath = GetSafeUserPath(directory, destinationRelativePath);
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? directory);
+
+                File.Move(sourcePath, destinationPath);
+                File.SetLastWriteTimeUtc(destinationPath, sourceModifiedAt);
+                restoredAnyReplica = true;
+            }
+
+            if (restoredAnyReplica)
+            {
+                restored += 1;
+            }
+        }
+
+        if (restored > 0)
+        {
+            await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
+        }
+
+        return (restored, skippedBecauseExists, missingFromTrash);
+    }
+
+    public async Task<int> DeleteFromTrashAsync(string username, IReadOnlyList<string> fileNames)
+    {
+        username = NormalizeEmail(username);
+        PurgeExpiredTrash(username);
+        int deleted = 0;
+
+        foreach (string rawFileName in fileNames)
+        {
+            string relativePath = NormalizeRelativePath(rawFileName);
+            bool deletedAnyReplica = false;
+
+            if (!IsValidRelativePath(relativePath))
+            {
+                continue;
+            }
+
+            foreach (string directory in GetUserDirectories(username))
+            {
+                string trashRoot = Path.Combine(directory, ".trash");
+                string path = GetSafeUserPath(trashRoot, relativePath);
+
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+
+                File.Delete(path);
+                deletedAnyReplica = true;
+            }
+
+            if (deletedAnyReplica)
+            {
+                deleted += 1;
+            }
+        }
+
+        if (deleted > 0)
+        {
+            await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
+        }
+
+        return deleted;
+    }
+
+    public Task<(int Moved, int SkippedExisting, int Missing)> MoveFilesAsync(
         string username,
         IReadOnlyList<string> fileNames,
         string destinationDirectory,
@@ -358,12 +518,12 @@ public sealed class FileStorage
 
         if (normalizedDestination.Length > 0 && !IsValidRelativePath(normalizedDestination))
         {
-            return Task.FromResult((0, 0));
+            return Task.FromResult((0, 0, 0));
         }
 
         if (normalizedNewName.Length > 0 && !IsValidRelativePath(normalizedNewName))
         {
-            return Task.FromResult((0, 0));
+            return Task.FromResult((0, 0, 0));
         }
 
         return MoveFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting, normalizedNewName);
@@ -374,7 +534,37 @@ public sealed class FileStorage
         return rootPaths.Select(rootPath => Path.Combine(rootPath, username));
     }
 
-    private async Task<(int Moved, int SkippedExisting)> MoveFilesInternalAsync(
+    private void PurgeExpiredTrash(string username)
+    {
+        DateTime cutoff = DateTime.UtcNow.Subtract(TrashRetention);
+
+        foreach (string directory in GetUserDirectories(username))
+        {
+            string trashDirectory = Path.Combine(directory, ".trash");
+
+            if (!Directory.Exists(trashDirectory))
+            {
+                continue;
+            }
+
+            foreach (string batchDirectory in Directory.EnumerateDirectories(trashDirectory, "*", SearchOption.TopDirectoryOnly))
+            {
+                string batchName = Path.GetFileName(batchDirectory);
+
+                if (!TryParseTrashBatchTime(batchName, out DateTime batchTimeUtc))
+                {
+                    continue;
+                }
+
+                if (batchTimeUtc < cutoff)
+                {
+                    Directory.Delete(batchDirectory, true);
+                }
+            }
+        }
+    }
+
+    private async Task<(int Moved, int SkippedExisting, int Missing)> MoveFilesInternalAsync(
         string username,
         IReadOnlyList<string> fileNames,
         string destinationDirectory,
@@ -383,6 +573,7 @@ public sealed class FileStorage
     {
         int moved = 0;
         int skippedBecauseExists = 0;
+        int missingSource = 0;
 
         foreach (string rawFileName in fileNames)
         {
@@ -407,6 +598,12 @@ public sealed class FileStorage
 
             if (destinationRelativePath.StartsWith(relativePath + "/", StringComparison.Ordinal))
             {
+                continue;
+            }
+
+            if (!PathExists(username, relativePath))
+            {
+                missingSource += 1;
                 continue;
             }
 
@@ -475,7 +672,39 @@ public sealed class FileStorage
             await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
         }
 
-        return (moved, skippedBecauseExists);
+        return (moved, skippedBecauseExists, missingSource);
+    }
+
+    private static bool TryParseTrashRelativePath(string path, out string sourceRelativePath, out string destinationRelativePath)
+    {
+        sourceRelativePath = "";
+        destinationRelativePath = "";
+
+        if (!IsValidRelativePath(path))
+        {
+            return false;
+        }
+
+        int slashIndex = path.IndexOf('/');
+
+        if (slashIndex <= 0 || slashIndex >= path.Length - 1)
+        {
+            return false;
+        }
+
+        sourceRelativePath = path;
+        destinationRelativePath = path[(slashIndex + 1)..];
+        return IsValidRelativePath(destinationRelativePath);
+    }
+
+    private static bool TryParseTrashBatchTime(string batchName, out DateTime batchTimeUtc)
+    {
+        return DateTime.TryParseExact(
+            batchName,
+            "yyyyMMdd-HHmmss",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+            out batchTimeUtc);
     }
 
     private bool PathExists(string username, string relativePath)
@@ -507,6 +736,20 @@ public sealed class FileStorage
             {
                 Directory.Delete(path, true);
             }
+        }
+    }
+
+    private static void DeletePathInDirectory(string directory, string relativePath)
+    {
+        string path = GetSafeUserPath(directory, relativePath);
+
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+        else if (Directory.Exists(path))
+        {
+            Directory.Delete(path, true);
         }
     }
 
@@ -570,7 +813,7 @@ public sealed class FileStorage
     private static bool IsValidFileName(string fileName)
     {
         return fileName.Length > 0
-            && fileName.Length <= 80
+            && fileName.Length <= MaxFileNameLength
             && fileName != "."
             && fileName != ".."
             && !fileName.Contains("..", StringComparison.Ordinal)
