@@ -5,7 +5,6 @@ using System.Globalization;
 
 public sealed class FileStorage
 {
-    private static readonly Regex FileNameRegex = new("^[a-zA-Z0-9_. -]{1,80}$", RegexOptions.Compiled);
     private const int MaxRelativePathLength = 240;
     private readonly IReadOnlyList<string> rootPaths;
     private readonly string storageMode;
@@ -69,6 +68,44 @@ public sealed class FileStorage
             {
                 var info = new FileInfo(path);
                 string relativePath = ToDisplayPath(Path.GetRelativePath(directory, path));
+
+                if (!entries.TryGetValue(relativePath, out FileEntry? existing)
+                    || existing.ModifiedAt < info.LastWriteTimeUtc)
+                {
+                    entries[relativePath] = new FileEntry(relativePath, info.Length, info.LastWriteTimeUtc);
+                }
+            }
+        }
+
+        return entries.Values
+            .OrderByDescending(entry => entry.ModifiedAt)
+            .ThenBy(entry => entry.Name)
+            .ToList();
+    }
+
+    public IReadOnlyList<FileEntry> GetTrashFiles(string? username)
+    {
+        if (username is null)
+        {
+            return [];
+        }
+
+        username = NormalizeEmail(username);
+        Dictionary<string, FileEntry> entries = new(StringComparer.Ordinal);
+
+        foreach (string directory in GetUserDirectories(username))
+        {
+            string trashDirectory = Path.Combine(directory, ".trash");
+
+            if (!Directory.Exists(trashDirectory))
+            {
+                continue;
+            }
+
+            foreach (string path in Directory.EnumerateFiles(trashDirectory, "*", SearchOption.AllDirectories))
+            {
+                var info = new FileInfo(path);
+                string relativePath = ToDisplayPath(Path.GetRelativePath(trashDirectory, path));
 
                 if (!entries.TryGetValue(relativePath, out FileEntry? existing)
                     || existing.ModifiedAt < info.LastWriteTimeUtc)
@@ -308,9 +345,169 @@ public sealed class FileStorage
         return moved;
     }
 
+    public Task<(int Moved, int SkippedExisting)> MoveFilesAsync(
+        string username,
+        IReadOnlyList<string> fileNames,
+        string destinationDirectory,
+        bool overwriteExisting = false,
+        string? newName = null)
+    {
+        username = NormalizeEmail(username);
+        string normalizedDestination = NormalizeRelativePath(destinationDirectory);
+        string normalizedNewName = NormalizeRelativePath(newName ?? "");
+
+        if (normalizedDestination.Length > 0 && !IsValidRelativePath(normalizedDestination))
+        {
+            return Task.FromResult((0, 0));
+        }
+
+        if (normalizedNewName.Length > 0 && !IsValidRelativePath(normalizedNewName))
+        {
+            return Task.FromResult((0, 0));
+        }
+
+        return MoveFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting, normalizedNewName);
+    }
+
     private IEnumerable<string> GetUserDirectories(string username)
     {
         return rootPaths.Select(rootPath => Path.Combine(rootPath, username));
+    }
+
+    private async Task<(int Moved, int SkippedExisting)> MoveFilesInternalAsync(
+        string username,
+        IReadOnlyList<string> fileNames,
+        string destinationDirectory,
+        bool overwriteExisting,
+        string normalizedNewName)
+    {
+        int moved = 0;
+        int skippedBecauseExists = 0;
+
+        foreach (string rawFileName in fileNames)
+        {
+            string relativePath = NormalizeRelativePath(rawFileName);
+
+            if (!IsValidRelativePath(relativePath))
+            {
+                continue;
+            }
+
+            string fileName = string.IsNullOrWhiteSpace(normalizedNewName)
+                ? Path.GetFileName(relativePath)
+                : normalizedNewName;
+            string destinationRelativePath = string.IsNullOrEmpty(destinationDirectory)
+                ? fileName
+                : $"{destinationDirectory}/{fileName}";
+
+            if (string.Equals(relativePath, destinationRelativePath, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (destinationRelativePath.StartsWith(relativePath + "/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (PathExists(username, destinationRelativePath))
+            {
+                if (!overwriteExisting)
+                {
+                    skippedBecauseExists += 1;
+                    continue;
+                }
+
+                DeletePathAcrossReplicas(username, destinationRelativePath);
+            }
+
+            bool movedAnyReplica = false;
+            DateTime sourceModifiedAt = DateTime.UtcNow;
+            bool sourceModifiedCaptured = false;
+
+            foreach (string directory in GetUserDirectories(username))
+            {
+                string sourcePath = GetSafeUserPath(directory, relativePath);
+                string destinationPath = GetSafeUserPath(directory, destinationRelativePath);
+
+                if (!File.Exists(sourcePath))
+                {
+                    if (!Directory.Exists(sourcePath))
+                    {
+                        continue;
+                    }
+
+                    if (!sourceModifiedCaptured)
+                    {
+                        sourceModifiedAt = Directory.GetLastWriteTimeUtc(sourcePath);
+                        sourceModifiedCaptured = true;
+                    }
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? directory);
+
+                    Directory.Move(sourcePath, destinationPath);
+                    Directory.SetLastWriteTimeUtc(destinationPath, sourceModifiedAt);
+                    movedAnyReplica = true;
+                    continue;
+                }
+
+                if (!sourceModifiedCaptured)
+                {
+                    sourceModifiedAt = File.GetLastWriteTimeUtc(sourcePath);
+                    sourceModifiedCaptured = true;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? directory);
+
+                File.Move(sourcePath, destinationPath);
+                File.SetLastWriteTimeUtc(destinationPath, sourceModifiedAt);
+                movedAnyReplica = true;
+            }
+
+            if (movedAnyReplica)
+            {
+                moved += 1;
+            }
+        }
+
+        if (moved > 0)
+        {
+            await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
+        }
+
+        return (moved, skippedBecauseExists);
+    }
+
+    private bool PathExists(string username, string relativePath)
+    {
+        foreach (string directory in GetUserDirectories(username))
+        {
+            string path = GetSafeUserPath(directory, relativePath);
+
+            if (File.Exists(path) || Directory.Exists(path))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void DeletePathAcrossReplicas(string username, string relativePath)
+    {
+        foreach (string directory in GetUserDirectories(username))
+        {
+            string path = GetSafeUserPath(directory, relativePath);
+
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+            else if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+            }
+        }
     }
 
     private string GetWriteDirectory(string username, string relativePath)
@@ -372,10 +569,12 @@ public sealed class FileStorage
 
     private static bool IsValidFileName(string fileName)
     {
-        return FileNameRegex.IsMatch(fileName)
+        return fileName.Length > 0
+            && fileName.Length <= 80
             && fileName != "."
             && fileName != ".."
-            && !fileName.Contains("..", StringComparison.Ordinal);
+            && !fileName.Contains("..", StringComparison.Ordinal)
+            && fileName.All(ch => !char.IsControl(ch) && ch != '/' && ch != '\\' && ch != '\0');
     }
 
     private static string GetSafeUserPath(string directory, string relativePath)

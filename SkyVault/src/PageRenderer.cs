@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Text;
 
 public static class PageRenderer
 {
@@ -8,11 +9,14 @@ public static class PageRenderer
         UserAccount? account,
         IReadOnlyList<FileEntry> files,
         string mode = "login",
-        string? message = null)
+        string? message = null,
+        string currentDirectory = "",
+        string currentView = "home",
+        IReadOnlyList<FileEntry>? trashFiles = null)
     {
         string content = account is null
             ? RenderAuthPanel(mode, message)
-            : RenderDashboard(account, files, message);
+            : RenderDashboard(account, files, currentDirectory, currentView, trashFiles ?? [], message);
 
         return Layout(content);
     }
@@ -31,6 +35,33 @@ public static class PageRenderer
           <div class="auth-card">
             <a class="button" href="/">Back to SkyVault</a>
           </div>
+        </section>
+        """);
+    }
+
+    public static string RenderFilePreview(string filePath, byte[] content)
+    {
+        filePath = NormalizeCloudPath(filePath);
+        string fileName = GetDisplayName(filePath);
+        string parentDirectory = GetParentDirectory(filePath);
+        string backHref = parentDirectory.Length == 0 ? "/" : $"/?path={WebUtility.UrlEncode(parentDirectory)}";
+        string rawHref = $"/files/raw?path={WebUtility.UrlEncode(filePath)}";
+        string downloadHref = $"/files/download?path={WebUtility.UrlEncode(filePath)}";
+        string viewer = RenderFileViewer(filePath, rawHref, content);
+
+        return Layout($$"""
+        <section class="preview-shell">
+          <header class="preview-top">
+            <a class="button secondary" href="{{backHref}}">Back</a>
+            <div class="preview-title">
+              <p class="eyebrow">/home/{{Escape(parentDirectory)}}</p>
+              <h1>{{Escape(fileName)}}</h1>
+            </div>
+            <a class="button secondary" href="{{downloadHref}}">Download</a>
+          </header>
+          <section class="preview-panel">
+            {{viewer}}
+          </section>
         </section>
         """);
     }
@@ -169,17 +200,27 @@ public static class PageRenderer
         """;
     }
 
-    private static string RenderDashboard(UserAccount account, IReadOnlyList<FileEntry> files, string? message)
+    private static string RenderDashboard(UserAccount account, IReadOnlyList<FileEntry> files, string currentDirectory, string currentView, IReadOnlyList<FileEntry> trashFiles, string? message)
     {
+        currentDirectory = NormalizeCloudPath(currentDirectory);
+        currentView = NormalizeView(currentView);
+        IReadOnlyList<FileEntry> visibleFiles = GetVisibleFiles(files, trashFiles, currentDirectory, currentView);
         double usedPercent = account.QuotaBytes == 0 ? 0 : account.UsedBytes * 100.0 / account.QuotaBytes;
         usedPercent = Math.Clamp(usedPercent, 0, 100);
         string usedPercentText = usedPercent.ToString("0.##", CultureInfo.InvariantCulture);
-        string rows = files.Count == 0
+        string rows = visibleFiles.Count == 0
             ? """<tr class="empty-row"><td colspan="4">No files yet.</td></tr>"""
-            : string.Join("\n", files.Select(RenderFileRow));
+            : string.Join("\n", visibleFiles.Select(file => RenderFileRow(file, currentView != "trash")));
+        string cards = visibleFiles.Count == 0
+            ? """<p class="empty-grid">No files yet.</p>"""
+            : string.Join("\n", visibleFiles.Select(file => RenderFileCard(file, currentView != "trash")));
         string alert = RenderAlert(message, success: true);
         string accountInitial = GetInitial(account.Username);
         string uploadInfo = message is null ? "No upload running." : Escape(message);
+        string largestFiles = RenderLargestFiles(files);
+        string parentDirectory = GetParentDirectory(currentDirectory);
+        string parentHref = currentDirectory.Length == 0 ? "/" : $"/?path={WebUtility.UrlEncode(parentDirectory)}";
+        string pathBreadcrumbs = RenderPathBreadcrumbs(currentDirectory);
 
         return $$"""
         <section class="app-shell">
@@ -191,6 +232,7 @@ public static class PageRenderer
             <form class="upload-panel compact-upload" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
               <input name="file" id="fileInput" type="file" multiple required>
               <input name="folder" id="folderInput" type="file" webkitdirectory directory multiple>
+              <input name="currentPath" id="currentPath" type="hidden" value="{{Escape(currentDirectory)}}">
               <div class="upload-status">
                 <div class="progress">
                   <span id="progressBar"></span>
@@ -199,35 +241,60 @@ public static class PageRenderer
             </form>
 
             <nav class="nav-list" aria-label="SkyVault sections">
-              <a class="nav-item active" href="/">
-                <span class="nav-icon home-icon"></span>
-                <span>Home</span>
+              <p class="places-heading">Miejsca</p>
+              <a class="nav-item {{ActiveClass(currentView, "home")}}" href="/">
+                <img class="nav-icon-img" src="/assets/icons/user-home.svg" alt="">
+                <span>Katalog domowy</span>
               </a>
-              <a class="nav-item" href="/">
-                <span class="nav-icon folder-icon"></span>
-                <span>My files</span>
+              <a class="nav-item {{ActiveClass(currentView, "documents")}}" href="/?view=documents">
+                <img class="nav-icon-img" src="/assets/icons/folder-documents.svg" alt="">
+                <span>Dokumenty</span>
               </a>
-              <a class="nav-item" href="/">
-                <span class="nav-icon clock-icon"></span>
-                <span>Recent</span>
+              <a class="nav-item {{ActiveClass(currentView, "music")}}" href="/?view=music">
+                <img class="nav-icon-img" src="/assets/icons/folder-music.svg" alt="">
+                <span>Muzyka</span>
+              </a>
+              <a class="nav-item {{ActiveClass(currentView, "images")}}" href="/?view=images">
+                <img class="nav-icon-img" src="/assets/icons/folder-pictures.svg" alt="">
+                <span>Obrazy</span>
+              </a>
+              <a class="nav-item {{ActiveClass(currentView, "videos")}}" href="/?view=videos">
+                <img class="nav-icon-img" src="/assets/icons/folder-videos.svg" alt="">
+                <span>Filmy</span>
+              </a>
+              <a class="nav-item {{ActiveClass(currentView, "recent")}}" href="/?view=recent">
+                <img class="nav-icon-img" src="/assets/icons/document-open-recent.svg" alt="">
+                <span>Ostatnie pliki</span>
+              </a>
+              <a class="nav-item {{ActiveClass(currentView, "trash")}}" href="/?view=trash">
+                <img class="nav-icon-img" src="/assets/icons/user-trash.svg" alt="">
+                <span>Kosz</span>
               </a>
             </nav>
 
             <div class="storage-summary">
-              <p id="uploadInfo">{{uploadInfo}}</p>
+              <div class="largest-files" id="largestFiles" hidden>
+                <p class="largest-title">Największe pliki</p>
+                {{largestFiles}}
+              </div>
+              <div class="drive-row">
+                <img class="nav-icon-img" src="/assets/icons/drive-harddisk.svg" alt="">
+                <span>Skydysk</span>
+                <button class="drive-toggle" id="driveToggle" type="button" aria-label="Pokaż największe pliki" aria-expanded="false">
+                  <img class="drive-eject-icon" src="/assets/icons/media-eject.svg" alt="">
+                </button>
+              </div>
               <div class="meter">
                 <span style="width: {{usedPercentText}}%"></span>
               </div>
-              <p>{{FormatBytes(account.UsedBytes)}} of {{FormatBytes(account.QuotaBytes)}} used</p>
+              <p>{{FormatBytes(account.UsedBytes)}} z 5 GB</p>
+              <p id="uploadInfo">{{uploadInfo}}</p>
             </div>
           </aside>
 
           <main class="workspace">
             <header class="workspace-top">
-              <label class="search-box">
-                <span class="search-icon"></span>
-                <input id="fileSearch" type="search" placeholder="Search files" autocomplete="off">
-              </label>
+              <div></div>
               <div class="account-menu">
                 <span class="account-email">{{Escape(account.Username)}}</span>
                 <span class="avatar">{{Escape(accountInitial)}}</span>
@@ -237,20 +304,61 @@ public static class PageRenderer
               </div>
             </header>
 
+            <div class="location-row">
+              <div class="path-bar" aria-label="Current cloud path">
+                <a class="path-up" href="{{parentHref}}" aria-label="Parent folder">..</a>
+                <span class="path-folder-icon" aria-hidden="true">
+                  <svg viewBox="0 0 22 22" focusable="false">
+                    <rect opacity="0.18" width="20" height="12" x="1" y="8.5" rx="1" ry="1"/>
+                    <path fill="#147eb8" d="M1 16c0 .554.446 1 1 1h18c.554 0 1-.446 1-1V5c0-.554-.446-1-1-1h-9c-1.5 0-2-2-3.5-2H2c-.554 0-1 .446-1 1"/>
+                    <rect opacity="0.18" width="20" height="12" x="1" y="7.5" rx="1" ry="1"/>
+                    <rect fill="#e4e4e4" width="16" height="8" x="3" y="6" rx="1" ry="1"/>
+                    <rect fill="#57b8ec" width="20" height="12" x="1" y="8" rx="1" ry="1"/>
+                    <path opacity="0.1" fill="#ffffff" d="M2 2c-.554 0-1 .446-1 1v.5c0-.554.446-1 1-1h5.5c1.5 0 2 2 3.5 2h9c.554 0 1 .446 1 1V5c0-.554-.446-1-1-1h-9c-1.5 0-2-2-3.5-2z"/>
+                  </svg>
+                </span>
+                <div class="path-breadcrumbs" id="pathBreadcrumbs">
+                  {{pathBreadcrumbs}}
+                </div>
+                <form class="path-editor" id="pathEditor" hidden action="/">
+                  <input id="pathEditorInput" name="path" value="{{Escape(currentDirectory.Length == 0 ? "/home/" : ToVirtualPath(currentDirectory, true))}}" autocomplete="off">
+                  <button class="path-editor-button" type="button" data-editor-action="clear" aria-label="Clear path">
+                    <svg viewBox="0 0 22 22" focusable="false">
+                      <path fill="currentColor" d="M14 5l5 6-5 6H3V5zm-2 3h-1c-.28 0-.53.11-.71.29L9 9.59 7.71 8.29A1 1 0 0 0 7 8H6v1c0 .28.11.53.29.71L7.59 11l-1.3 1.29A1 1 0 0 0 6 13v1h1c.28 0 .53-.11.71-.29L9 12.41l1.29 1.3c.18.18.43.29.71.29h1v-1c0-.28-.11-.53-.29-.71L10.41 11l1.3-1.29c.18-.18.29-.43.29-.71z"/>
+                    </svg>
+                  </button>
+                  <button class="path-editor-button" type="button" data-editor-action="menu" aria-label="Show path menu">
+                    <svg viewBox="0 0 16 16" focusable="false">
+                      <path fill="currentColor" d="M7 2v8L3.5 6.5 2 8l6 6 6-6-1.5-1.5L9 10V2z"/>
+                    </svg>
+                  </button>
+                  <button class="path-editor-button" type="submit" aria-label="Open path">
+                    <svg viewBox="0 0 22 22" focusable="false">
+                      <path fill="currentColor" d="M16.5 8c0 0 .965-.965.215-1.715S15 6.5 15 6.5l-6 7-2-2s-.965-.965-1.715-.215S5.5 13 5.5 13L9 16.5z"/>
+                    </svg>
+                  </button>
+                </form>
+              </div>
+            </div>
+
             {{alert}}
 
             <section class="files-panel" id="filesPanel">
               <div class="section-head">
-                <div>
-                  <p class="eyebrow">Workspace</p>
-                  <h1>My files</h1>
-                </div>
                 <div class="file-actions">
-                  <span>{{files.Count}} item(s)</span>
+                  <span>{{visibleFiles.Count}} item(s)</span>
+                  <div class="view-switch" aria-label="File view">
+                    <button class="view-button active" type="button" data-view-mode="list" aria-label="List view">
+                      <span class="view-list-icon"></span>
+                    </button>
+                    <button class="view-button" type="button" data-view-mode="grid" aria-label="Icon view">
+                      <span class="view-grid-icon"></span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <table>
+              <table class="files-table">
                 <thead>
                   <tr>
                     <th class="select-column">
@@ -265,7 +373,9 @@ public static class PageRenderer
                   {{rows}}
                 </tbody>
               </table>
-              <p class="empty-filter" id="emptyFilter">No matching files.</p>
+              <div class="files-grid" id="filesGrid">
+                {{cards}}
+              </div>
             </section>
           </main>
         </section>
@@ -299,17 +409,28 @@ public static class PageRenderer
           const form = document.getElementById('uploadForm');
           const input = document.getElementById('fileInput');
           const folderInput = document.getElementById('folderInput');
+          const currentPath = document.getElementById('currentPath');
           const bar = document.getElementById('progressBar');
           const info = document.getElementById('uploadInfo');
-          const search = document.getElementById('fileSearch');
+          const driveToggle = document.getElementById('driveToggle');
+          const largestFiles = document.getElementById('largestFiles');
+          const pathBar = document.querySelector('.path-bar');
+          const pathEditor = document.getElementById('pathEditor');
+          const pathEditorInput = document.getElementById('pathEditorInput');
+          const pathBreadcrumbs = document.getElementById('pathBreadcrumbs');
+          const pathCrumbs = Array.from(document.querySelectorAll('.path-crumb'));
           const rows = Array.from(document.querySelectorAll('#fileRows tr[data-file-name]'));
-          const emptyFilter = document.getElementById('emptyFilter');
           const filesPanel = document.getElementById('filesPanel');
           const contextMenu = document.getElementById('contextMenu');
           const selectAllFiles = document.getElementById('selectAllFiles');
           const fileChecks = Array.from(document.querySelectorAll('.file-check'));
           const sortButtons = Array.from(document.querySelectorAll('.sort-button'));
+          const viewButtons = Array.from(document.querySelectorAll('.view-button'));
           const fileRows = document.getElementById('fileRows');
+          const filesGrid = document.getElementById('filesGrid');
+          const cards = Array.from(document.querySelectorAll('.file-card'));
+          const gridChecks = Array.from(document.querySelectorAll('.grid-file-check'));
+          const moveDragType = 'application/x-skyvault-move-paths';
           let currentSort = 'modified';
           let sortDirection = 'desc';
           let autoUploadAfterPick = false;
@@ -317,8 +438,104 @@ public static class PageRenderer
           let selectionAnchor = null;
           let pointerSelecting = false;
           let pointerMode = true;
+          let fileViewMode = localStorage.getItem('skyvaultFileView') || 'list';
 
           sortRows();
+          setFileView(fileViewMode);
+          hidePathEditor();
+
+          driveToggle.addEventListener('click', () => {
+            const expanded = driveToggle.getAttribute('aria-expanded') === 'true';
+            driveToggle.setAttribute('aria-expanded', String(!expanded));
+            largestFiles.hidden = expanded;
+          });
+
+          pathBar.addEventListener('click', (event) => {
+            if (event.target.closest('a, button, input')) {
+              return;
+            }
+
+            showPathEditor();
+          });
+
+          pathBar.addEventListener('dragover', (event) => {
+            if (!hasMoveDrag(event.dataTransfer)) {
+              return;
+            }
+
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+            pathBar.classList.add('is-drop-target');
+          });
+
+          pathBar.addEventListener('dragleave', (event) => {
+            if (!hasMoveDrag(event.dataTransfer)) {
+              return;
+            }
+
+            pathBar.classList.remove('is-drop-target');
+          });
+
+          pathBar.addEventListener('drop', async (event) => {
+            if (!hasMoveDrag(event.dataTransfer)) {
+              return;
+            }
+
+            event.preventDefault();
+            pathBar.classList.remove('is-drop-target');
+            await moveDraggedFiles(getDraggedMovePaths(event.dataTransfer), currentPath.value);
+          });
+
+          pathCrumbs.forEach((crumb) => {
+            crumb.addEventListener('dragover', (event) => {
+              if (!hasMoveDrag(event.dataTransfer)) {
+                return;
+              }
+
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'move';
+              crumb.classList.add('is-drop-target');
+            });
+
+            crumb.addEventListener('dragleave', (event) => {
+              if (!hasMoveDrag(event.dataTransfer)) {
+                return;
+              }
+
+              crumb.classList.remove('is-drop-target');
+            });
+
+            crumb.addEventListener('drop', async (event) => {
+              if (!hasMoveDrag(event.dataTransfer)) {
+                return;
+              }
+
+              event.preventDefault();
+              crumb.classList.remove('is-drop-target');
+              await moveDraggedFiles(getDraggedMovePaths(event.dataTransfer), crumb.dataset.targetPath || '');
+            });
+          });
+
+          pathEditor.addEventListener('submit', (event) => {
+            event.preventDefault();
+            window.location.href = pathToUrl(pathEditorInput.value);
+          });
+
+          pathEditor.querySelector('[data-editor-action="clear"]').addEventListener('click', () => {
+            pathEditorInput.value = '';
+            pathEditorInput.focus();
+          });
+
+          pathEditor.querySelector('[data-editor-action="menu"]').addEventListener('click', () => {
+            pathEditorInput.focus();
+          });
+
+          pathEditorInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              hidePathEditor();
+            }
+          });
 
           input.addEventListener('change', () => {
             info.textContent = describeFiles(input.files);
@@ -349,23 +566,6 @@ public static class PageRenderer
             await uploadFileItems(fileItemsFromList(input.files));
           });
 
-          search.addEventListener('input', () => {
-            const query = search.value.trim().toLowerCase();
-            let visible = 0;
-
-            rows.forEach((row) => {
-              const match = row.dataset.fileName.includes(query);
-              row.hidden = !match;
-
-              if (match) {
-                visible += 1;
-              }
-            });
-
-            emptyFilter.style.display = rows.length && !visible ? 'block' : 'none';
-            updateSelectedFiles();
-          });
-
           sortButtons.forEach((button) => {
             button.addEventListener('click', () => {
               const sort = button.dataset.sort;
@@ -378,6 +578,12 @@ public static class PageRenderer
               }
 
               sortRows();
+            });
+          });
+
+          viewButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+              setFileView(button.dataset.viewMode);
             });
           });
 
@@ -409,7 +615,6 @@ public static class PageRenderer
                 return;
               }
 
-              event.preventDefault();
               pointerSelecting = true;
               pointerMode = event.ctrlKey || event.metaKey ? !check.checked : true;
               applyRowSelection(row, event);
@@ -417,6 +622,81 @@ public static class PageRenderer
 
             row.addEventListener('mouseenter', (event) => {
               if (!pointerSelecting) {
+                return;
+              }
+
+              event.preventDefault();
+              setRowSelected(row, pointerMode);
+              updateSelectedFiles();
+            });
+          });
+
+          rows.forEach((row) => {
+            row.addEventListener('dragstart', (event) => {
+              beginMoveDrag(event, row.dataset.filePath || '', row.dataset.entryKind || 'file');
+            });
+
+            row.addEventListener('dragend', () => {
+              clearDropTargets();
+            });
+          });
+
+          gridChecks.forEach((check) => {
+            const card = check.closest('.file-card');
+            const row = getRowForCard(card);
+
+            check.addEventListener('click', (event) => {
+              event.stopPropagation();
+            });
+
+            check.addEventListener('change', () => {
+              if (!row) {
+                return;
+              }
+
+              setRowSelected(row, check.checked);
+              updateSelectedFiles();
+            });
+          });
+
+          cards.forEach((card) => {
+            card.addEventListener('dragstart', (event) => {
+              beginMoveDrag(event, card.dataset.filePath || '', card.dataset.entryKind || 'file');
+            });
+
+            card.addEventListener('dragend', () => {
+              clearDropTargets();
+            });
+
+            card.addEventListener('mousedown', (event) => {
+              if (event.button !== 0 || event.target.closest('a, input, button')) {
+                return;
+              }
+
+              const row = getRowForCard(card);
+
+              if (!row) {
+                return;
+              }
+
+              const check = row.querySelector('.file-check');
+              if (!check) {
+                return;
+              }
+
+              pointerSelecting = true;
+              pointerMode = event.ctrlKey || event.metaKey ? !check.checked : true;
+              applyRowSelection(row, event);
+            });
+
+            card.addEventListener('mouseenter', (event) => {
+              if (!pointerSelecting) {
+                return;
+              }
+
+              const row = getRowForCard(card);
+
+              if (!row) {
                 return;
               }
 
@@ -439,6 +719,23 @@ public static class PageRenderer
                 fileChecks.forEach((item) => {
                   setRowSelected(item.closest('tr'), false);
                 });
+                setRowSelected(row, true);
+                selectionAnchor = row;
+                updateSelectedFiles();
+              }
+
+              showContextMenu(event.clientX, event.clientY);
+            });
+          });
+
+          cards.forEach((card) => {
+            card.addEventListener('contextmenu', (event) => {
+              event.preventDefault();
+              const row = getRowForCard(card);
+              const check = row?.querySelector('.file-check');
+
+              if (row && check && !check.checked) {
+                clearSelection();
                 setRowSelected(row, true);
                 selectionAnchor = row;
                 updateSelectedFiles();
@@ -495,7 +792,7 @@ public static class PageRenderer
           });
 
           filesPanel.addEventListener('contextmenu', (event) => {
-            if (event.target.closest('tr[data-file-name]')) {
+            if (event.target.closest('tr[data-file-name], .file-card')) {
               return;
             }
 
@@ -571,6 +868,7 @@ public static class PageRenderer
                 const item = uploadItems[index];
                 const data = new FormData();
                 data.append('file', item.file, item.path || item.file.name);
+                data.append('currentPath', currentPath.value);
                 lastResponse = await uploadOne(data, item, index, uploadItems.length);
               }
 
@@ -613,6 +911,27 @@ public static class PageRenderer
               info.textContent = prefix + 'Starting ' + item.path + '...';
               request.send(data);
             });
+          }
+
+          function showPathEditor() {
+            pathEditor.hidden = false;
+            pathBreadcrumbs.hidden = true;
+            pathEditorInput.focus();
+            pathEditorInput.select();
+          }
+
+          function hidePathEditor() {
+            pathEditor.hidden = true;
+            pathBreadcrumbs.hidden = false;
+          }
+
+          function pathToUrl(value) {
+            const cleaned = value.trim()
+              .replaceAll('\\\\', '/')
+              .replace(/^\/?home\/?/, '')
+              .replace(/^\/+|\/+$/g, '');
+
+            return cleaned ? '/?path=' + encodeURIComponent(cleaned) : '/';
           }
 
           function fileItemsFromList(files) {
@@ -699,6 +1018,7 @@ public static class PageRenderer
 
             const data = new URLSearchParams();
             data.set(fieldName, name);
+            data.set('currentPath', currentPath.value);
             info.textContent = 'Creating...';
 
             try {
@@ -753,6 +1073,22 @@ public static class PageRenderer
               selectAllFiles.checked = enabled.length > 0 && enabled.every((check) => check.checked);
               selectAllFiles.indeterminate = selected > 0 && !selectAllFiles.checked;
             }
+          }
+
+          function getRowForCard(card) {
+            if (!card) {
+              return null;
+            }
+
+            return rows.find((row) => row.dataset.fileName === card.dataset.fileName) || null;
+          }
+
+          function getCardForRow(row) {
+            if (!row) {
+              return null;
+            }
+
+            return cards.find((card) => card.dataset.fileName === row.dataset.fileName) || null;
           }
 
           function applyRowSelection(row, event) {
@@ -810,6 +1146,17 @@ public static class PageRenderer
 
             check.checked = selected;
             row.classList.toggle('is-selected', selected);
+
+            const card = getCardForRow(row);
+
+            if (card) {
+              const gridCheck = card.querySelector('.grid-file-check');
+              card.classList.toggle('is-selected', selected);
+
+              if (gridCheck) {
+                gridCheck.checked = selected;
+              }
+            }
           }
 
           function downloadSelectedZip() {
@@ -847,6 +1194,7 @@ public static class PageRenderer
 
             const data = new URLSearchParams();
             data.set('paths', paths.join('\n'));
+            data.set('currentPath', currentPath.value);
 
             try {
               const response = await fetch('/files/trash', {
@@ -869,8 +1217,160 @@ public static class PageRenderer
               .map((check) => check.value);
           }
 
+          function hasMoveDrag(dataTransfer) {
+            return Boolean(dataTransfer && Array.from(dataTransfer.types || []).includes(moveDragType));
+          }
+
+          function getDraggedMovePaths(dataTransfer) {
+            const payload = dataTransfer?.getData(moveDragType) || dataTransfer?.getData('text/plain') || '';
+
+            if (payload.trim()) {
+              return payload.split('\n').map((path) => path.trim()).filter(Boolean);
+            }
+
+            return [];
+          }
+
+          function clearDropTargets() {
+            pathBar.classList.remove('is-drop-target');
+            pathCrumbs.forEach((crumb) => crumb.classList.remove('is-drop-target'));
+          }
+
+          function beginMoveDrag(event, sourcePath, sourceKind) {
+            if (!event.dataTransfer || !sourcePath) {
+              return;
+            }
+
+            const selectedPaths = getSelectedPaths();
+            const draggedPaths = selectedPaths.length > 1 && selectedPaths.includes(sourcePath)
+              ? selectedPaths
+              : [sourcePath];
+            const preview = createMoveDragPreview(draggedPaths, sourceKind);
+
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData(moveDragType, draggedPaths.join('\n'));
+            event.dataTransfer.setData('text/plain', draggedPaths.join('\n'));
+            event.dataTransfer.setDragImage(preview, 18, 18);
+            window.setTimeout(() => preview.remove(), 0);
+          }
+
+          function createMoveDragPreview(paths, sourceKind) {
+            const preview = document.createElement('div');
+            preview.className = 'move-drag-preview';
+
+            const stack = document.createElement('div');
+            stack.className = 'move-drag-stack';
+
+            paths.slice(0, 3).forEach((path, index) => {
+              const card = document.createElement('div');
+              card.className = 'move-drag-card';
+              card.style.zIndex = String(10 - index);
+
+              const icon = document.createElement('span');
+              icon.className = sourceKind === 'folder' ? 'folder-icon move-drag-folder-icon' : 'file-icon';
+              card.appendChild(icon);
+              stack.appendChild(card);
+            });
+
+            preview.appendChild(stack);
+
+            if (paths.length > 3) {
+              const count = document.createElement('span');
+              count.className = 'move-drag-count';
+              count.textContent = '+' + (paths.length - 3);
+              preview.appendChild(count);
+            }
+
+            document.body.appendChild(preview);
+            return preview;
+          }
+
+          async function moveDraggedFiles(paths, destinationPath) {
+            const uniquePaths = [...new Set(paths.filter(Boolean))];
+
+            if (!uniquePaths.length) {
+              info.textContent = 'Select files first.';
+              return;
+            }
+
+            try {
+              const html = await submitMoveRequest(uniquePaths, destinationPath || '');
+              const conflict = /already contains a file or folder with the same name|already exists/i.test(html);
+
+              if (conflict) {
+                if (uniquePaths.length === 1) {
+                  const replaceExisting = confirm('That name already exists. OK = replace it, Cancel = rename it.');
+
+                  if (replaceExisting) {
+                    const replacedHtml = await submitMoveRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
+                    document.open();
+                    document.write(replacedHtml);
+                    document.close();
+                    return;
+                  }
+
+                  const sourceName = uniquePaths[0].split('/').pop() || uniquePaths[0];
+                  const renamed = prompt('New name', sourceName);
+
+                  if (renamed && renamed.trim()) {
+                    const renamedHtml = await submitMoveRequest(uniquePaths, destinationPath || '', { newName: renamed.trim() });
+                    document.open();
+                    document.write(renamedHtml);
+                    document.close();
+                    return;
+                  }
+
+                  document.open();
+                  document.write(html);
+                  document.close();
+                  return;
+                }
+
+                if (!confirm('That destination already exists. OK = replace selected items, Cancel = skip.')) {
+                  document.open();
+                  document.write(html);
+                  document.close();
+                  return;
+                }
+
+                const replacedHtml = await submitMoveRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
+                document.open();
+                document.write(replacedHtml);
+                document.close();
+                return;
+              }
+
+              document.open();
+              document.write(html);
+              document.close();
+            } catch {
+              info.textContent = 'Could not move files.';
+            }
+          }
+
+          async function submitMoveRequest(paths, destinationPath, extraFields = {}) {
+            const data = new URLSearchParams();
+            data.set('paths', paths.join('\n'));
+            data.set('destinationPath', destinationPath);
+            data.set('currentPath', currentPath.value);
+
+            Object.entries(extraFields).forEach(([key, value]) => {
+              data.set(key, value);
+            });
+
+            info.textContent = 'Moving...';
+
+            const response = await fetch('/files/move', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: data.toString()
+            });
+
+            return response.text();
+          }
+
           function sortRows() {
-            const sorted = [...rows].sort((left, right) => {
+            const compareEntries = (left, right) => {
               const leftKind = left.dataset.entryKind === 'folder' ? 0 : 1;
               const rightKind = right.dataset.entryKind === 'folder' ? 0 : 1;
 
@@ -889,13 +1389,26 @@ public static class PageRenderer
               }
 
               return sortDirection === 'asc' ? result : -result;
-            });
+            };
+
+            const sorted = [...rows].sort(compareEntries);
+            const sortedCards = [...cards].sort(compareEntries);
 
             sorted.forEach((row) => fileRows.appendChild(row));
+            sortedCards.forEach((card) => filesGrid.appendChild(card));
             sortButtons.forEach((button) => {
               button.classList.toggle('active', button.dataset.sort === currentSort);
               button.textContent = button.dataset.sort[0].toUpperCase() + button.dataset.sort.slice(1)
                 + (button.dataset.sort === currentSort ? (sortDirection === 'asc' ? ' asc' : ' desc') : '');
+            });
+          }
+
+          function setFileView(mode) {
+            fileViewMode = mode === 'grid' ? 'grid' : 'list';
+            filesPanel.classList.toggle('is-grid-view', fileViewMode === 'grid');
+            localStorage.setItem('skyvaultFileView', fileViewMode);
+            viewButtons.forEach((button) => {
+              button.classList.toggle('active', button.dataset.viewMode === fileViewMode);
             });
           }
 
@@ -914,24 +1427,28 @@ public static class PageRenderer
         """;
     }
 
-    private static string RenderFileRow(FileEntry file)
+    private static string RenderFileRow(FileEntry file, bool allowOpen = true)
     {
+        string displayName = GetDisplayName(file.Name);
         string iconClass = file.IsFolder ? "folder-icon row-folder-icon" : "file-icon";
         string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
         string encodedPath = WebUtility.UrlEncode(file.Name);
+        string draggableAttr = " draggable=\"true\"";
         string checkbox = file.IsFolder
             ? "<input type=\"checkbox\" disabled aria-label=\"Folders cannot be downloaded yet\">"
-            : $"<input class=\"file-check\" type=\"checkbox\" value=\"{Escape(file.Name)}\" aria-label=\"Select {Escape(file.Name)}\">";
-        string nameContent = file.IsFolder
-            ? Escape(file.Name)
-            : $"<a href=\"/files/download?path={encodedPath}\">{Escape(file.Name)}</a>";
+            : $"<input class=\"file-check\" type=\"checkbox\" value=\"{Escape(file.Name)}\" aria-label=\"Select {Escape(displayName)}\">";
+        string nameContent = allowOpen
+            ? file.IsFolder
+                ? $"<a href=\"/?path={encodedPath}\">{Escape(displayName)}</a>"
+                : $"<a href=\"/files/open?path={encodedPath}\">{Escape(displayName)}</a>"
+            : Escape(displayName);
         string uploadedClass = !file.IsFolder && DateTimeOffset.UtcNow - file.ModifiedAt < TimeSpan.FromMinutes(5)
             ? " class=\"fresh-upload\""
             : "";
         long modifiedUnix = file.ModifiedAt.ToUnixTimeSeconds();
 
         return $$"""
-        <tr{{uploadedClass}} data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
+        <tr{{uploadedClass}}{{draggableAttr}} data-file-path="{{Escape(file.Name)}}" data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
           <td class="select-column">{{checkbox}}</td>
           <td>
             <span class="file-name">
@@ -943,6 +1460,244 @@ public static class PageRenderer
           <td>{{file.ModifiedAt.LocalDateTime:g}}</td>
         </tr>
         """;
+    }
+
+    private static string RenderFileCard(FileEntry file, bool allowOpen = true)
+    {
+        string displayName = GetDisplayName(file.Name);
+        string iconClass = file.IsFolder ? "folder-icon grid-folder-icon" : "file-icon grid-file-icon";
+        string encodedPath = WebUtility.UrlEncode(file.Name);
+        string href = file.IsFolder ? $"/?path={encodedPath}" : $"/files/open?path={encodedPath}";
+        string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
+        string draggableAttr = " draggable=\"true\"";
+        string checkbox = file.IsFolder
+            ? ""
+            : $"<input class=\"grid-file-check\" type=\"checkbox\" aria-label=\"Select {Escape(displayName)}\">";
+        string content = allowOpen
+            ? $"""<a class="file-card-link" href="{href}">{Escape(displayName)}</a>"""
+            : $"""<span class="file-card-link">{Escape(displayName)}</span>""";
+        long modifiedUnix = file.ModifiedAt.ToUnixTimeSeconds();
+
+        return $$"""
+        <div class="file-card"{{draggableAttr}} data-file-path="{{Escape(file.Name)}}" data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
+          <div class="file-card-preview">
+            <span class="{{iconClass}}"></span>
+            {{checkbox}}
+          </div>
+          <div class="file-card-body">
+            {{content}}
+            <span class="file-card-meta">{{size}} · {{file.ModifiedAt.LocalDateTime:g}}</span>
+          </div>
+        </div>
+        """;
+    }
+
+    private static string RenderFileViewer(string filePath, string rawHref, byte[] content)
+    {
+        string extension = Path.GetExtension(filePath).ToLowerInvariant();
+
+        if (IsImageExtension(extension))
+        {
+            return $"""<img class="preview-media preview-image" src="{Escape(rawHref)}" alt="{Escape(GetDisplayName(filePath))}">""";
+        }
+
+        if (IsAudioExtension(extension))
+        {
+            return $"""<audio class="preview-media" src="{Escape(rawHref)}" controls autoplay></audio>""";
+        }
+
+        if (IsVideoExtension(extension))
+        {
+            return $"""<video class="preview-media preview-video" src="{Escape(rawHref)}" controls autoplay></video>""";
+        }
+
+        string text = Encoding.UTF8.GetString(content);
+        return $"""<pre class="text-preview">{Escape(text)}</pre>""";
+    }
+
+    private static string RenderLargestFiles(IReadOnlyList<FileEntry> files)
+    {
+        const long minBytes = 2L * 1024 * 1024;
+        List<FileEntry> largestFiles = files
+            .Where(file => !file.IsFolder && file.SizeBytes >= minBytes)
+            .OrderByDescending(file => file.SizeBytes)
+            .ThenBy(file => file.Name)
+            .Take(100)
+            .ToList();
+
+        if (largestFiles.Count == 0)
+        {
+            return """<p class="largest-empty">Brak plików od 2 MB.</p>""";
+        }
+
+        string items = string.Join("\n", largestFiles.Select(file =>
+        {
+            string encodedPath = WebUtility.UrlEncode(file.Name);
+            return $$"""
+            <a class="largest-file" href="/files/open?path={{encodedPath}}">
+              <span>{{Escape(GetDisplayName(file.Name))}}</span>
+              <strong>{{FormatBytes(file.SizeBytes)}}</strong>
+            </a>
+            """;
+        }));
+
+        return $"""<div class="largest-list">{items}</div>""";
+    }
+
+    private static bool IsImageExtension(string extension)
+    {
+        return extension is ".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".svg";
+    }
+
+    private static bool IsAudioExtension(string extension)
+    {
+        return extension is ".mp3" or ".wav" or ".ogg" or ".oga" or ".flac" or ".m4a" or ".aac" or ".opus";
+    }
+
+    private static bool IsVideoExtension(string extension)
+    {
+        return extension is ".mp4" or ".webm" or ".ogv" or ".mov" or ".m4v" or ".mkv";
+    }
+
+    private static IReadOnlyList<FileEntry> GetDirectoryEntries(IReadOnlyList<FileEntry> files, string currentDirectory)
+    {
+        currentDirectory = NormalizeCloudPath(currentDirectory);
+        string prefix = currentDirectory.Length == 0 ? "" : $"{currentDirectory}/";
+
+        return files
+            .Where(file =>
+            {
+                if (prefix.Length > 0 && !file.Name.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                string remaining = prefix.Length == 0 ? file.Name : file.Name[prefix.Length..];
+                return remaining.Length > 0 && !remaining.Contains('/', StringComparison.Ordinal);
+            })
+            .OrderBy(file => file.IsFolder ? 0 : 1)
+            .ThenBy(file => GetDisplayName(file.Name), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IReadOnlyList<FileEntry> GetVisibleFiles(IReadOnlyList<FileEntry> files, IReadOnlyList<FileEntry> trashFiles, string currentDirectory, string currentView)
+    {
+        currentView = NormalizeView(currentView);
+
+        return currentView switch
+        {
+            "recent" => files
+                .Where(file => !file.IsFolder)
+                .OrderByDescending(file => file.ModifiedAt)
+                .ThenBy(file => file.Name)
+                .Take(20)
+                .ToList(),
+            "videos" => FilterFiles(files, IsVideoExtension),
+            "images" => FilterFiles(files, IsImageExtension),
+            "music" => FilterFiles(files, IsAudioExtension),
+            "documents" => files
+                .Where(file => !file.IsFolder && IsDocumentFile(file.Name))
+                .OrderByDescending(file => file.ModifiedAt)
+                .ThenBy(file => file.Name)
+                .ToList(),
+            "trash" => trashFiles
+                .OrderByDescending(file => file.ModifiedAt)
+                .ThenBy(file => file.Name)
+                .ToList(),
+            _ => GetDirectoryEntries(files, currentDirectory)
+        };
+    }
+
+    private static IReadOnlyList<FileEntry> FilterFiles(IReadOnlyList<FileEntry> files, Func<string, bool> extensionMatcher)
+    {
+        return files
+            .Where(file => !file.IsFolder && extensionMatcher(Path.GetExtension(file.Name).ToLowerInvariant()))
+            .OrderByDescending(file => file.ModifiedAt)
+            .ThenBy(file => file.Name)
+            .ToList();
+    }
+
+    private static bool IsDocumentFile(string path)
+    {
+        string extension = Path.GetExtension(path).ToLowerInvariant();
+        return !IsImageExtension(extension) && !IsAudioExtension(extension) && !IsVideoExtension(extension);
+    }
+
+    private static string GetDisplayName(string path)
+    {
+        string cleaned = NormalizeCloudPath(path);
+        int slashIndex = cleaned.LastIndexOf('/');
+        return slashIndex < 0 ? cleaned : cleaned[(slashIndex + 1)..];
+    }
+
+    private static string ToVirtualPath(string relativePath, bool isFolder)
+    {
+        string cleaned = NormalizeCloudPath(relativePath);
+        string path = string.IsNullOrWhiteSpace(cleaned) ? "/home" : $"/home/{cleaned}";
+        return isFolder && path != "/home" ? $"{path}/" : path;
+    }
+
+    private static string NormalizeCloudPath(string path)
+    {
+        string[] parts = path.Trim()
+            .Replace('\\', '/')
+            .Trim('/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(part => part != "." && part != ".." && !part.Contains("..", StringComparison.Ordinal))
+            .ToArray();
+
+        return string.Join('/', parts);
+    }
+
+    private static string NormalizeView(string view)
+    {
+        return view.Trim().ToLowerInvariant() switch
+        {
+            "recent" or "videos" or "images" or "music" or "documents" or "trash" => view.Trim().ToLowerInvariant(),
+            _ => "home"
+        };
+    }
+
+    private static string ActiveClass(string currentView, string expectedView)
+    {
+        return NormalizeView(currentView) == expectedView ? "active" : "";
+    }
+
+    private static string GetParentDirectory(string currentDirectory)
+    {
+        currentDirectory = NormalizeCloudPath(currentDirectory);
+        int slashIndex = currentDirectory.LastIndexOf('/');
+        return slashIndex < 0 ? "" : currentDirectory[..slashIndex];
+    }
+
+    private static string RenderPathBreadcrumbs(string currentDirectory)
+    {
+        string normalized = NormalizeCloudPath(currentDirectory);
+        List<string> crumbs = new()
+        {
+            """<a class="path-crumb" href="/" data-target-path="">home</a>"""
+        };
+
+        if (normalized.Length == 0)
+        {
+            crumbs[0] = """<a class="path-crumb is-current" href="/" data-target-path="" aria-current="page">home</a>""";
+            return string.Join("", crumbs);
+        }
+
+        string[] parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string path = "";
+
+        for (int index = 0; index < parts.Length; index++)
+        {
+            string part = parts[index];
+            path = path.Length == 0 ? part : $"{path}/{part}";
+            string href = $"/?path={WebUtility.UrlEncode(path)}";
+            string currentClass = index == parts.Length - 1 ? " is-current" : "";
+            string ariaCurrent = index == parts.Length - 1 ? " aria-current=\"page\"" : "";
+            crumbs.Add($"""<span class="path-separator" aria-hidden="true">/</span><a class="path-crumb{currentClass}" href="{href}" data-target-path="{Escape(path)}"{ariaCurrent}>{Escape(part)}</a>""");
+        }
+
+        return string.Join("", crumbs);
     }
 
     private static string Layout(string content)
@@ -1159,10 +1914,10 @@ public static class PageRenderer
             .sidebar {
               display: flex;
               flex-direction: column;
-              gap: 18px;
+              gap: 16px;
               padding: 22px 16px;
               border-right: 1px solid var(--line);
-              background: #f4f7fb;
+              background: #f8fafc;
             }
 
             .sidebar .brand-logo {
@@ -1248,29 +2003,45 @@ public static class PageRenderer
 
             .nav-list {
               display: grid;
-              gap: 4px;
+              gap: 3px;
               margin-top: 4px;
+            }
+
+            .places-heading {
+              margin: 0 0 4px;
+              padding: 0 8px;
+              color: #94a3b8;
+              font-size: 15px;
+              line-height: 1.2;
             }
 
             .nav-item {
               display: flex;
               align-items: center;
-              gap: 12px;
-              min-height: 42px;
-              padding: 0 12px;
-              border-radius: 999px;
+              gap: 10px;
+              min-height: 34px;
+              padding: 0 8px;
+              border-radius: 6px;
               color: #334155;
-              font-weight: 700;
+              font-size: 16px;
+              font-weight: 500;
             }
 
             .nav-item.active {
-              background: var(--blue-soft);
-              color: #0f3b80;
+              background: #e8eef7;
+              color: #111827;
+            }
+
+            .nav-icon-img {
+              display: block;
+              width: 22px;
+              height: 22px;
+              flex: 0 0 auto;
+              object-fit: contain;
             }
 
             .nav-icon,
-            .file-icon,
-            .search-icon {
+            .file-icon {
               position: relative;
               display: inline-block;
               flex: 0 0 auto;
@@ -1346,66 +2117,348 @@ public static class PageRenderer
               padding: 12px;
             }
 
+            .largest-files {
+              max-height: 220px;
+              margin-bottom: 10px;
+              overflow-y: auto;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: #ffffff;
+            }
+
+            .largest-title {
+              position: sticky;
+              top: 0;
+              margin: 0;
+              padding: 8px 10px;
+              border-bottom: 1px solid #edf1f7;
+              background: #ffffff;
+              color: #64748b;
+              font-size: 12px;
+              font-weight: 800;
+              text-transform: uppercase;
+            }
+
+            .largest-list {
+              display: grid;
+            }
+
+            .largest-file {
+              display: grid;
+              grid-template-columns: minmax(0, 1fr) auto;
+              gap: 8px;
+              padding: 8px 10px;
+              border-bottom: 1px solid #edf1f7;
+              color: #334155;
+              font-size: 13px;
+              font-weight: 600;
+            }
+
+            .largest-file:last-child {
+              border-bottom: 0;
+            }
+
+            .largest-file span {
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .largest-file strong {
+              color: #0f766e;
+              font-size: 12px;
+              white-space: nowrap;
+            }
+
+            .largest-empty {
+              margin: 0;
+              padding: 10px;
+              color: #64748b;
+              font-size: 13px;
+            }
+
             .storage-summary p {
               margin: 9px 0 0;
               font-size: 13px;
             }
 
             .storage-summary #uploadInfo {
-              margin: 0 0 10px;
+              margin: 10px 0 0;
               color: #047857;
               font-weight: 700;
               word-break: break-word;
             }
 
+            .drive-row {
+              display: grid;
+              grid-template-columns: auto minmax(0, 1fr) auto;
+              gap: 10px;
+              align-items: center;
+              color: #334155;
+              font-size: 16px;
+              font-weight: 500;
+            }
+
+            .drive-eject-icon {
+              display: block;
+              width: 18px;
+              height: 18px;
+              opacity: 0.85;
+            }
+
+            .drive-toggle {
+              display: grid;
+              place-items: center;
+              width: 28px;
+              min-height: 28px;
+              margin: 0;
+              padding: 0;
+              border-radius: 6px;
+              background: transparent;
+            }
+
+            .drive-toggle[aria-expanded="true"] .drive-eject-icon {
+              transform: rotate(180deg);
+            }
+
             .workspace {
               display: grid;
-              grid-template-rows: auto auto 1fr;
-              gap: 18px;
+              grid-template-rows: auto auto auto 1fr;
+              gap: 14px;
               min-width: 0;
               padding: 18px 22px 28px;
             }
 
             .workspace-top {
               display: grid;
-              grid-template-columns: minmax(260px, 760px) auto;
+              grid-template-columns: minmax(0, 1fr) auto;
               gap: 18px;
               align-items: center;
             }
 
-            .search-box {
+            .location-row {
+              min-width: 0;
+            }
+
+            .path-bar {
               position: relative;
+              display: flex;
+              align-items: center;
+              gap: 7px;
+              min-width: 0;
+              width: min(100%, 1080px);
+              height: 52px;
+              padding: 0 8px;
+              border: 1px solid #b8c0cc;
+              background: #ffffff;
+              border-radius: 8px;
+              color: #1f2937;
+            }
+
+            .path-bar.is-drop-target {
+              border-color: #60a5fa;
+              background: #f8fbff;
+              box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.12);
+            }
+
+            .path-up {
+              display: none;
+              place-items: center;
+              width: 30px;
+              height: 30px;
+              border-radius: 6px;
+              color: #475569;
+              font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              font-weight: 900;
+              text-decoration: none;
+            }
+
+            .path-up:hover {
+              background: #e2e8f0;
+              color: #0f172a;
+            }
+
+            .path-folder-icon {
+              display: inline-grid;
+              place-items: center;
+              flex: 0 0 auto;
+              width: 22px;
+              height: 22px;
+              color: #1f2937;
+            }
+
+            .path-folder-icon svg,
+            .path-editor-button svg {
+              display: block;
+              width: 22px;
+              height: 22px;
+            }
+
+            .path-breadcrumbs {
+              display: flex;
+              align-items: center;
+              gap: 0;
+              min-width: 0;
+              flex: 1 1 auto;
+              overflow: hidden;
+            }
+
+            .path-breadcrumbs[hidden] {
+              display: none;
+            }
+
+            .path-separator {
+              flex: 0 0 auto;
+              margin: 0 4px;
+              color: #94a3b8;
+              font-weight: 700;
+            }
+
+            .path-crumb {
+              display: inline-flex;
+              align-items: center;
+              min-width: 0;
+              max-width: 100%;
+              overflow: hidden;
+              color: #334155;
+              font-size: 18px;
+              font-weight: 700;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .path-crumb:hover {
+              color: var(--blue);
+            }
+
+            .path-crumb.is-current {
+              color: #111827;
+            }
+
+            .path-crumb.is-drop-target {
+              border-radius: 6px;
+              background: #dbeafe;
+              color: var(--blue);
+            }
+
+            .path-editor {
+              display: grid;
+              grid-template-columns: minmax(0, 1fr) auto auto auto;
+              gap: 2px;
+              align-items: center;
+              flex: 1 1 auto;
+              min-width: 0;
               margin: 0;
             }
 
-            .search-box input {
-              height: 50px;
-              padding-left: 44px;
+            .path-editor[hidden] {
+              display: none;
+            }
+
+            .path-editor input {
+              height: 42px;
               border: 0;
-              background: #e8eef7;
-              border-radius: 999px;
+              padding: 0 3px;
+              background: transparent;
+              color: #111827;
+              font-family: Arial, sans-serif;
+              font-size: 20px;
+              font-weight: 400;
+              letter-spacing: 0;
             }
 
-            .search-icon {
-              position: absolute;
-              left: 18px;
-              top: 16px;
-              width: 14px;
-              height: 14px;
-              border: 2px solid #475569;
-              border-radius: 50%;
+            .path-editor input:focus {
+              outline: 0;
+              border-color: transparent;
             }
 
-            .search-icon::after {
-              content: "";
-              position: absolute;
-              right: -6px;
-              bottom: -5px;
-              width: 8px;
-              height: 2px;
-              border-radius: 999px;
-              background: #475569;
-              transform: rotate(45deg);
+            .path-editor-button {
+              width: 32px;
+              min-height: 32px;
+              margin: 0;
+              padding: 0;
+              border-radius: 6px;
+              background: transparent;
+              color: #475569;
+              font-family: Arial, sans-serif;
+              line-height: 1;
+            }
+
+            .path-editor-button:hover {
+              background: #eef2f7;
+              color: #0f172a;
+            }
+
+            .preview-shell {
+              min-height: 100vh;
+              display: grid;
+              grid-template-rows: auto 1fr;
+              gap: 18px;
+              padding: 22px;
+              background: var(--bg);
+            }
+
+            .preview-top {
+              display: grid;
+              grid-template-columns: auto minmax(0, 1fr) auto;
+              gap: 16px;
+              align-items: center;
+            }
+
+            .preview-title {
+              min-width: 0;
+            }
+
+            .preview-title .eyebrow {
+              margin-bottom: 3px;
+              color: var(--muted);
+              font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              font-size: 12px;
+              font-weight: 800;
+            }
+
+            .preview-title h1 {
+              overflow: hidden;
+              margin: 0;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .preview-panel {
+              display: grid;
+              place-items: center;
+              min-height: 0;
+              overflow: auto;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface);
+            }
+
+            .preview-media {
+              width: min(100%, 1100px);
+            }
+
+            .preview-image {
+              max-height: calc(100vh - 150px);
+              object-fit: contain;
+            }
+
+            .preview-video {
+              max-height: calc(100vh - 150px);
+              background: #111827;
+            }
+
+            .text-preview {
+              width: 100%;
+              min-height: 100%;
+              margin: 0;
+              padding: 22px;
+              color: #111827;
+              font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              font-size: 14px;
+              line-height: 1.55;
+              white-space: pre-wrap;
+              word-break: break-word;
             }
 
             .account-menu {
@@ -1491,8 +2544,92 @@ public static class PageRenderer
             .file-actions {
               display: flex;
               align-items: center;
-              justify-content: flex-end;
+              justify-content: space-between;
               gap: 12px;
+              width: 100%;
+            }
+
+            .view-switch {
+              display: inline-flex;
+              align-items: center;
+              padding: 3px;
+              border: 1px solid var(--line-strong);
+              border-radius: 8px;
+              background: #ffffff;
+            }
+
+            .view-button {
+              width: 34px;
+              min-height: 34px;
+              margin: 0;
+              padding: 0;
+              border: 0;
+              border-radius: 6px;
+              background: transparent;
+              color: #64748b;
+              box-shadow: none;
+            }
+
+            .view-button:hover {
+              background: #eef4ff;
+              color: #1f2937;
+            }
+
+            .view-button.active {
+              background: #dbeafe;
+              color: var(--blue);
+            }
+
+            .view-list-icon,
+            .view-grid-icon {
+              position: relative;
+              display: inline-block;
+              width: 16px;
+              height: 16px;
+            }
+
+            .view-list-icon::before,
+            .view-list-icon::after,
+            .view-grid-icon::before,
+            .view-grid-icon::after {
+              content: "";
+              position: absolute;
+              background: currentColor;
+              border-radius: 1px;
+            }
+
+            .view-list-icon::before {
+              left: 1px;
+              top: 2px;
+              width: 4px;
+              height: 4px;
+              box-shadow:
+                0 5px 0 currentColor,
+                0 10px 0 currentColor;
+            }
+
+            .view-list-icon::after {
+              left: 7px;
+              top: 2px;
+              width: 8px;
+              height: 2px;
+              box-shadow:
+                0 5px 0 currentColor,
+                0 10px 0 currentColor;
+            }
+
+            .view-grid-icon::before {
+              inset: 1px;
+              border: 2px solid currentColor;
+              background: transparent;
+              box-shadow:
+                6px 0 0 -1px currentColor,
+                0 6px 0 -1px currentColor,
+                6px 6px 0 -1px currentColor;
+            }
+
+            .view-grid-icon::after {
+              display: none;
             }
 
             .compact {
@@ -1575,6 +2712,224 @@ public static class PageRenderer
 
             tbody tr.fresh-upload:hover {
               background: #dffbea;
+            }
+
+            .files-grid {
+              display: none;
+              grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+              gap: 14px;
+              padding: 0 26px 26px;
+              user-select: none;
+            }
+
+            .files-panel.is-grid-view .files-table {
+              display: none;
+            }
+
+            .files-panel.is-grid-view .files-grid {
+              display: grid;
+            }
+
+            .file-card {
+              position: relative;
+              display: grid;
+              grid-template-rows: 104px minmax(62px, auto);
+              min-width: 0;
+              overflow: hidden;
+              border: 1px solid #dbe3ef;
+              border-radius: 8px;
+              background: #ffffff;
+              box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+            }
+
+            .file-card:hover {
+              border-color: #b8c7dc;
+              background: #f8fafc;
+            }
+
+            .file-card.is-selected {
+              border-color: #93c5fd;
+              background: #dbeafe;
+              box-shadow: inset 4px 0 0 var(--blue), 0 1px 2px rgba(15, 23, 42, 0.05);
+            }
+
+            .file-card-preview {
+              position: relative;
+              display: grid;
+              place-items: center;
+              min-width: 0;
+              border-bottom: 1px solid #edf1f7;
+              background: linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
+            }
+
+            .file-card.is-selected .file-card-preview {
+              border-bottom-color: #bfdbfe;
+              background: #cfe1ff;
+            }
+
+            .grid-file-check {
+              position: absolute;
+              left: 9px;
+              top: 9px;
+              width: 16px;
+              height: 16px;
+              margin: 0;
+              padding: 0;
+            }
+
+            .grid-file-icon {
+              width: 42px;
+              height: 50px;
+            }
+
+            .grid-file-icon::after {
+              width: 14px;
+              height: 14px;
+            }
+
+            .grid-folder-icon {
+              width: 58px;
+              height: 42px;
+              color: #2563eb;
+              background: #dbeafe;
+            }
+
+            .grid-folder-icon::before {
+              left: 3px;
+              top: -13px;
+              width: 24px;
+              height: 12px;
+            }
+
+            .file-card-body {
+              display: grid;
+              align-content: start;
+              gap: 5px;
+              min-width: 0;
+              padding: 10px 11px 12px;
+            }
+
+            .file-card-link {
+              display: block;
+              min-width: 0;
+              overflow: hidden;
+              color: #1f2937;
+              font-size: 13px;
+              font-weight: 700;
+              line-height: 1.25;
+              overflow-wrap: anywhere;
+            }
+
+            .file-card-link:hover {
+              color: var(--blue);
+            }
+
+            .file-card-meta {
+              overflow: hidden;
+              color: var(--muted);
+              font-size: 12px;
+              line-height: 1.25;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .move-drag-preview {
+              position: fixed;
+              top: -1000px;
+              left: -1000px;
+              width: 60px;
+              height: 52px;
+              pointer-events: none;
+              user-select: none;
+            }
+
+            .move-drag-stack {
+              position: relative;
+              width: 100%;
+              height: 100%;
+            }
+
+            .move-drag-card {
+              position: absolute;
+              inset: 0;
+              display: grid;
+              place-items: center;
+              width: 24px;
+              height: 30px;
+              border: 1px solid rgba(148, 163, 184, 0.55);
+              border-radius: 6px;
+              background: rgba(255, 255, 255, 0.92);
+              box-shadow: 0 8px 18px rgba(15, 23, 42, 0.14);
+              opacity: 0.9;
+            }
+
+            .move-drag-card:nth-child(1) {
+              transform: translate(0, 0);
+            }
+
+            .move-drag-card:nth-child(2) {
+              transform: translate(7px, 5px);
+              opacity: 0.72;
+            }
+
+            .move-drag-card:nth-child(3) {
+              transform: translate(14px, 10px);
+              opacity: 0.55;
+            }
+
+            .move-drag-card .file-icon {
+              width: 13px;
+              height: 16px;
+              border-width: 1px;
+              border-radius: 3px;
+            }
+
+            .move-drag-card .file-icon::after {
+              width: 5px;
+              height: 5px;
+              border-width: 1px;
+            }
+
+            .move-drag-folder-icon {
+              width: 16px;
+              height: 12px;
+              border-width: 1px;
+            }
+
+            .move-drag-folder-icon::before {
+              left: 0;
+              top: -4px;
+              width: 7px;
+              height: 4px;
+              border-width: 1px;
+            }
+
+            .move-drag-count {
+              position: absolute;
+              right: -3px;
+              bottom: -3px;
+              display: grid;
+              place-items: center;
+              min-width: 18px;
+              height: 18px;
+              padding: 0 4px;
+              border: 1px solid #bfdbfe;
+              border-radius: 999px;
+              background: #eff6ff;
+              color: #1d4ed8;
+              font-size: 11px;
+              font-weight: 800;
+              line-height: 1;
+              box-shadow: 0 4px 10px rgba(15, 23, 42, 0.12);
+            }
+
+            .empty-grid {
+              grid-column: 1 / -1;
+              margin: 0;
+              padding: 72px 24px;
+              border-top: 1px solid #edf1f7;
+              color: var(--muted);
+              text-align: center;
             }
 
             .file-name {
@@ -1737,20 +3092,8 @@ public static class PageRenderer
             }
 
             .empty-row td,
-            .empty-filter {
-              color: var(--muted);
-              text-align: center;
-            }
-
             .empty-row td {
               padding: 72px 24px;
-            }
-
-            .empty-filter {
-              display: none;
-              margin: 0;
-              padding: 52px 24px;
-              border-top: 1px solid #edf1f7;
             }
 
             @media (max-width: 900px) {

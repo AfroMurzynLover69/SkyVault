@@ -53,9 +53,15 @@ public sealed class CloudWebServer
         }
         catch (IOException)
         {
+            AppLog.Warn("Client disconnected with an I/O error.");
         }
         catch (SocketException)
         {
+            AppLog.Warn("Socket error while handling client.");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Unhandled server error while handling client.", ex);
         }
         finally
         {
@@ -72,15 +78,61 @@ public sealed class CloudWebServer
             return StaticFile(Path.Combine("SkyVault", "assets", "logo.png"), "image/png");
         }
 
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path.StartsWith("/assets/icons/", StringComparison.Ordinal))
+        {
+            string iconName = Path.GetFileName(request.Path);
+            return StaticFile(Path.Combine("SkyVault", "assets", "icons", iconName), "image/svg+xml");
+        }
+
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/")
         {
             string mode = request.Query.GetValueOrDefault("mode", "login");
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), mode));
+            string currentDirectory = NormalizeCloudPath(request.Query.GetValueOrDefault("path", ""));
+            string view = NormalizeView(request.Query.GetValueOrDefault("view", "home"));
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), mode, currentDirectory: currentDirectory, currentView: view, trashFiles: fileStorage.GetTrashFiles(email)));
         }
 
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/forgot-password")
         {
             return Html(PageRenderer.RenderForgotPassword());
+        }
+
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/files/open")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            string filePath = request.Query.GetValueOrDefault("path", "");
+            byte[]? content = await fileStorage.ReadFileAsync(email, filePath);
+
+            if (content is null)
+            {
+                return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
+            }
+
+            return Html(PageRenderer.RenderFilePreview(filePath, content));
+        }
+
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/files/raw")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            string filePath = request.Query.GetValueOrDefault("path", "");
+            byte[]? content = await fileStorage.ReadFileAsync(email, filePath);
+
+            if (content is null)
+            {
+                return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
+            }
+
+            var response = new HttpResponse(200, "OK", content, GetContentType(filePath));
+            response.Headers["Content-Disposition"] = $"inline; filename=\"{EscapeHeaderFileName(Path.GetFileName(filePath))}\"";
+            return response;
         }
 
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/files/download")
@@ -123,6 +175,41 @@ public sealed class CloudWebServer
             return response;
         }
 
+        if (request.Method == "POST" && request.Path == "/files/move")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            string destinationDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("destinationPath", ""));
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
+            string newName = request.Form.GetValueOrDefault("newName", "");
+            (int moved, int skippedExisting) = await fileStorage.MoveFilesAsync(email, selectedFiles, destinationDirectory, overwriteExisting, newName);
+            string message = moved == 0
+                ? (skippedExisting > 0 ? "That destination already contains a file or folder with the same name." : "Select files first.")
+                : skippedExisting > 0
+                    ? $"Moved {moved} file(s). {skippedExisting} item(s) were skipped because the target already exists."
+                    : $"Moved {moved} file(s).";
+
+            if (moved == 0 && skippedExisting > 0)
+            {
+                AppLog.Warn($"Move blocked by existing destination for {email}: {destinationDirectory}");
+            }
+            else if (moved > 0 && skippedExisting > 0)
+            {
+                AppLog.Warn($"Move completed with conflicts for {email}: {moved} moved, {skippedExisting} skipped, destination={destinationDirectory}");
+            }
+            else if (moved > 0)
+            {
+                AppLog.Info($"Move completed for {email}: {moved} item(s) to {destinationDirectory}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+        }
+
         if (request.Method == "POST" && request.Path == "/files/trash")
         {
             if (email is null)
@@ -131,10 +218,20 @@ public sealed class CloudWebServer
             }
 
             IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             int moved = await fileStorage.MoveToTrashAsync(email, selectedFiles);
             string message = moved == 0 ? "Select files first." : $"Moved {moved} file(s) to trash.";
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+            if (moved == 0)
+            {
+                AppLog.Warn($"Trash move requested without selected files for {email}");
+            }
+            else
+            {
+                AppLog.Info($"Moved {moved} item(s) to trash for {email}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
         }
 
         if (request.Method == "POST" && request.Path == "/forgot-password")
@@ -211,6 +308,7 @@ public sealed class CloudWebServer
 
             if (result != RegisterResult.Created)
             {
+                AppLog.Warn($"Registration rejected for {newEmail}: {RegistrationMessage(result)}");
                 return Html(PageRenderer.RenderHome(null, null, [], "register", RegistrationMessage(result)));
             }
 
@@ -219,6 +317,7 @@ public sealed class CloudWebServer
 
             if (sendResult != EmailSendResult.Sent)
             {
+                AppLog.Warn($"Verification email could not be sent to {newEmail}: {EmailMessage(sendResult)}");
                 return Html(PageRenderer.RenderHome(null, null, [], "register", EmailMessage(sendResult)));
             }
 
@@ -238,17 +337,20 @@ public sealed class CloudWebServer
 
             if (!pendingRegistrations.TryGetValue(verifyEmail, out PendingRegistration? pending))
             {
+                AppLog.Warn($"Verification attempted for missing pending registration: {verifyEmail}");
                 return Html(PageRenderer.RenderHome(null, null, [], "register", "Register again to get a new code."));
             }
 
             if (pending.ExpiresAt < DateTimeOffset.UtcNow)
             {
+                AppLog.Warn($"Verification code expired for {verifyEmail}");
                 pendingRegistrations.TryRemove(verifyEmail, out _);
                 return Html(PageRenderer.RenderHome(null, null, [], "register", "Verification code expired. Register again."));
             }
 
             if (!string.Equals(code, pending.Code, StringComparison.Ordinal))
             {
+                AppLog.Warn($"Wrong verification code for {verifyEmail}");
                 return Html(PageRenderer.RenderVerification(verifyEmail, "Wrong verification code."));
             }
 
@@ -256,6 +358,7 @@ public sealed class CloudWebServer
 
             if (result != RegisterResult.Created)
             {
+                AppLog.Warn($"Final registration failed for {verifyEmail}: {RegistrationMessage(result)}");
                 pendingRegistrations.TryRemove(verifyEmail, out _);
                 return Html(PageRenderer.RenderHome(null, null, [], "register", RegistrationMessage(result)));
             }
@@ -277,6 +380,7 @@ public sealed class CloudWebServer
                 return Redirect("/", sessionId);
             }
 
+            AppLog.Warn($"Failed login attempt for {login}");
             return Html(PageRenderer.RenderHome(null, null, [], "login", "Wrong email or password."));
         }
 
@@ -287,14 +391,17 @@ public sealed class CloudWebServer
                 return Redirect("/");
             }
 
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             MultipartFile? file = request.GetUploadedFile("file");
 
             if (file is null)
             {
-                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Choose a file first."));
+                AppLog.Warn($"Upload attempted without a file in {currentDirectory}");
+                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Choose a file first.", currentDirectory));
             }
 
-            FileCreateResult result = await fileStorage.SaveUploadedFileAsync(email, file);
+            string uploadPath = CombineCloudPath(currentDirectory, file.FileName);
+            FileCreateResult result = await fileStorage.SaveUploadedFileAsync(email, file with { FileName = uploadPath });
 
             string message = result switch
             {
@@ -304,7 +411,12 @@ public sealed class CloudWebServer
                 _ => "Could not upload file."
             };
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+            if (result != FileCreateResult.Created)
+            {
+                AppLog.Warn($"Upload failed for {uploadPath}: {message}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
         }
 
         if (request.Method == "POST" && request.Path == "/files/create")
@@ -314,11 +426,17 @@ public sealed class CloudWebServer
                 return Redirect("/");
             }
 
-            string fileName = request.Form.GetValueOrDefault("fileName", "");
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            string fileName = CombineCloudPath(currentDirectory, request.Form.GetValueOrDefault("fileName", ""));
             FileCreateResult result = await fileStorage.CreateTextFileAsync(email, fileName, "");
             string message = FileActionMessage(result, "Empty file created.", "Could not create file.");
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+            if (result != FileCreateResult.Created)
+            {
+                AppLog.Warn($"Create file failed for {fileName}: {message}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
         }
 
         if (request.Method == "POST" && request.Path == "/folders/create")
@@ -328,11 +446,17 @@ public sealed class CloudWebServer
                 return Redirect("/");
             }
 
-            string folderName = request.Form.GetValueOrDefault("folderName", "");
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            string folderName = CombineCloudPath(currentDirectory, request.Form.GetValueOrDefault("folderName", ""));
             FileCreateResult result = await fileStorage.CreateFolderAsync(email, folderName);
             string message = FileActionMessage(result, "Folder created.", "Could not create folder.");
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+            if (result != FileCreateResult.Created)
+            {
+                AppLog.Warn($"Create folder failed for {folderName}: {message}");
+            }
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
         }
 
         if (request.Method == "POST" && request.Path == "/logout")
@@ -414,35 +538,56 @@ public sealed class CloudWebServer
 
     private static string RegistrationMessage(RegisterResult result)
     {
-        return result switch
+        string message = result switch
         {
             RegisterResult.InvalidEmail => "Enter a valid email address.",
             RegisterResult.InvalidPassword => "Password must be at least 4 characters.",
             RegisterResult.AlreadyExists => "Email already has an account.",
             _ => "Registration failed."
         };
+
+        if (result != RegisterResult.Created)
+        {
+            AppLog.Warn($"Registration validation failed: {message}");
+        }
+
+        return message;
     }
 
     private static string EmailMessage(EmailSendResult result)
     {
-        return result switch
+        string message = result switch
         {
             EmailSendResult.NotConfigured => "Email sending is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM.",
             EmailSendResult.AuthenticationFailed => "SMTP login failed. Check SMTP_USER, SMTP_PASS and enable mail client access in your mailbox settings.",
             EmailSendResult.Failed => "Could not send email. Check SMTP settings.",
             _ => "Could not send email."
         };
+
+        if (result != EmailSendResult.Sent)
+        {
+            AppLog.Warn($"Email send failed: {message}");
+        }
+
+        return message;
     }
 
     private static string FileActionMessage(FileCreateResult result, string createdMessage, string failedMessage)
     {
-        return result switch
+        string message = result switch
         {
             FileCreateResult.Created => createdMessage,
-            FileCreateResult.InvalidFileName => "Name is invalid. Use letters, numbers, spaces, dots, dashes and underscores.",
+            FileCreateResult.InvalidFileName => "Name is invalid. Avoid path separators and control characters.",
             FileCreateResult.QuotaExceeded => "File is too large for your remaining space.",
             _ => failedMessage
         };
+
+        if (result != FileCreateResult.Created)
+        {
+            AppLog.Warn($"File action failed: {message}");
+        }
+
+        return message;
     }
 
     private static HttpResponse Html(string body, int statusCode = 200, string reason = "OK")
@@ -486,11 +631,77 @@ public sealed class CloudWebServer
             .Replace("\n", "", StringComparison.Ordinal);
     }
 
+    private static string GetContentType(string fileName)
+    {
+        return Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".png" => "image/png",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".bmp" => "image/bmp",
+            ".svg" => "image/svg+xml",
+            ".mp3" => "audio/mpeg",
+            ".wav" => "audio/wav",
+            ".ogg" or ".oga" => "audio/ogg",
+            ".flac" => "audio/flac",
+            ".m4a" => "audio/mp4",
+            ".aac" => "audio/aac",
+            ".opus" => "audio/opus",
+            ".mp4" or ".m4v" => "video/mp4",
+            ".webm" => "video/webm",
+            ".ogv" => "video/ogg",
+            ".mov" => "video/quicktime",
+            ".mkv" => "video/x-matroska",
+            ".txt" or ".log" or ".md" or ".csv" or ".json" or ".xml" or ".html" or ".css" or ".js" or ".cs" or ".sh" => "text/plain; charset=utf-8",
+            _ => "text/plain; charset=utf-8"
+        };
+    }
+
     private static IReadOnlyList<string> ParseSelectedFiles(string paths)
     {
         return paths
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
+    }
+
+    private static string NormalizeCloudPath(string path)
+    {
+        string[] parts = path.Trim()
+            .Replace('\\', '/')
+            .Trim('/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(part => part != "." && part != ".." && !part.Contains("..", StringComparison.Ordinal))
+            .ToArray();
+
+        return string.Join('/', parts);
+    }
+
+    private static string NormalizeView(string view)
+    {
+        return view.Trim().ToLowerInvariant() switch
+        {
+            "recent" or "videos" or "images" or "music" or "documents" or "trash" => view.Trim().ToLowerInvariant(),
+            _ => "home"
+        };
+    }
+
+    private static string CombineCloudPath(string currentDirectory, string name)
+    {
+        string normalizedDirectory = NormalizeCloudPath(currentDirectory);
+        string normalizedName = NormalizeCloudPath(name);
+
+        if (normalizedDirectory.Length == 0)
+        {
+            return normalizedName;
+        }
+
+        if (normalizedName.Length == 0)
+        {
+            return normalizedDirectory;
+        }
+
+        return $"{normalizedDirectory}/{normalizedName}";
     }
 }
 

@@ -16,6 +16,7 @@ string[] fileStorageDirectories = storageDirectories
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
 Directory.CreateDirectory(dataDirectory);
+AppLog.Initialize("log.txt");
 
 var userStore = new UserStore(Path.Combine(dataDirectory, "users.json"), quotaBytes);
 await userStore.LoadAsync();
@@ -24,27 +25,27 @@ var fileStorage = new FileStorage(fileStorageDirectories, storageMode, userStore
 var emailSender = EmailSender.FromEnvironment();
 var server = new CloudWebServer(IPAddress.Any, port, userStore, fileStorage, emailSender);
 
-Console.WriteLine("SkyVault is running.");
-Console.WriteLine($"Build: {BuildInfo.Version}");
-Console.WriteLine($"Open: http://127.0.0.1:{port}");
-Console.WriteLine($"Data directory: {dataDirectory}");
-Console.WriteLine($"Storage mode: {storageMode}");
-Console.WriteLine($"Storage locations: {string.Join(", ", fileStorageDirectories)}");
-Console.WriteLine("User files are stored in: <storage location>/<email>/");
-Console.WriteLine($"Default user quota: {quotaGb} GB");
-Console.WriteLine($"CPU cores visible to .NET: {Environment.ProcessorCount}");
+AppLog.Info("SkyVault is running.");
+AppLog.Info($"Build: {BuildInfo.Version}");
+AppLog.Info($"Open: http://127.0.0.1:{port}");
+AppLog.Info($"Data directory: {dataDirectory}");
+AppLog.Info($"Storage mode: {storageMode}");
+AppLog.Info($"Storage locations: {string.Join(", ", fileStorageDirectories)}");
+AppLog.Info("User files are stored in: <storage location>/<email>/");
+AppLog.Info($"Default user quota: {quotaGb} GB");
+AppLog.Info($"CPU cores visible to .NET: {Environment.ProcessorCount}");
 
 if (TryGetLongEnvironment("SKYVAULT_MAX_RAM_MB", out long configuredRamMb))
 {
-    Console.WriteLine($"Configured RAM limit: {configuredRamMb} MB");
+    AppLog.Info($"Configured RAM limit: {configuredRamMb} MB");
 }
 
 if (!emailSender.IsConfigured)
 {
-    Console.WriteLine("SMTP is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM.");
+    AppLog.Warn("SMTP is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM.");
 }
 
-Console.WriteLine("Press Ctrl+C to stop the server.");
+AppLog.Info("Press Ctrl+C to stop the server.");
 
 await server.StartAsync();
 
