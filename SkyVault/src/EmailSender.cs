@@ -106,16 +106,61 @@ public sealed class EmailSender
 
     private string BuildMessage(string recipient, string code)
     {
+        string safeRecipient = WebUtility.HtmlEncode(recipient);
+        string safeCode = WebUtility.HtmlEncode(code);
+        string html = $$"""
+        <!doctype html>
+        <html>
+        <body style="margin:0;padding:0;background:#f6f8fb;font-family:Arial,sans-serif;color:#1f2937;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f8fb;padding:32px 16px;">
+            <tr>
+              <td align="center">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+                  <tr>
+                    <td style="padding:28px 30px 18px;">
+                      <table role="presentation" cellspacing="0" cellpadding="0">
+                        <tr>
+                          <td style="width:34px;height:34px;border-radius:8px;background:#2563eb;color:#ffffff;font-size:20px;font-weight:700;text-align:center;vertical-align:middle;">S</td>
+                          <td style="padding-left:12px;font-size:20px;font-weight:700;color:#111827;">SkyVault</td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 30px 8px;">
+                      <h1 style="margin:0 0 10px;font-size:28px;line-height:1.2;color:#111827;">Verify your email</h1>
+                      <p style="margin:0;color:#64748b;font-size:15px;line-height:1.6;">Use this code to finish creating the SkyVault account for {{safeRecipient}}.</p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:22px 30px;">
+                      <div style="background:#eef4ff;border:1px solid #bfdbfe;border-radius:8px;padding:22px;text-align:center;">
+                        <div style="font-size:34px;line-height:1;font-weight:700;color:#1d4ed8;">{{safeCode}}</div>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 30px 30px;">
+                      <p style="margin:0;color:#64748b;font-size:14px;line-height:1.6;">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+        """;
+
         return string.Join("\r\n", [
             $"From: SkyVault <{from}>",
             $"To: {recipient}",
             "Subject: SkyVault verification code",
             "MIME-Version: 1.0",
-            "Content-Type: text/plain; charset=utf-8",
+            "Content-Type: text/html; charset=utf-8",
+            "Content-Transfer-Encoding: 8bit",
             "",
-            $"Your SkyVault verification code is: {code}",
-            "",
-            "This code expires in 10 minutes."
+            html
         ]);
     }
 

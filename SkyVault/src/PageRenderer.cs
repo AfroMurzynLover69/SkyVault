@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 
 public static class PageRenderer
@@ -19,10 +20,18 @@ public static class PageRenderer
     public static string RenderNotFound()
     {
         return Layout("""
-        <section class="panel narrow">
-          <h1>Not found</h1>
-          <p>This page does not exist.</p>
-          <a class="button" href="/">Back</a>
+        <section class="auth-page">
+          <div class="auth-brand">
+            <div class="brand-lockup">
+              <span class="logo-mark"></span>
+              <span>SkyVault</span>
+            </div>
+            <h1>Not found</h1>
+            <p>The page you requested does not exist.</p>
+          </div>
+          <div class="auth-card">
+            <a class="button" href="/">Back to SkyVault</a>
+          </div>
         </section>
         """);
     }
@@ -37,30 +46,31 @@ public static class PageRenderer
         bool registerMode = mode.Equals("register", StringComparison.OrdinalIgnoreCase);
         string action = registerMode ? "/register" : "/login";
         string title = registerMode ? "Create account" : "Sign in";
-        string button = registerMode ? "Register" : "Login";
+        string button = registerMode ? "Create account" : "Sign in";
         string passwordAuto = registerMode ? "new-password" : "current-password";
         string switchText = registerMode ? "Already have an account?" : "No account yet?";
         string switchLink = registerMode ? "/" : "/?mode=register";
-        string switchLabel = registerMode ? "Login" : "Create account";
-        string alert = string.IsNullOrWhiteSpace(message)
-            ? ""
-            : $"""<div class="alert">{Escape(message)}</div>""";
+        string switchLabel = registerMode ? "Sign in" : "Create account";
+        string alert = RenderAlert(message);
 
         return $$"""
-        <section class="auth-shell">
-          <div class="brand">
-            <p class="eyebrow">Private storage</p>
-            <h1>SkyVault</h1>
-            <p>Simple browser cloud with accounts, 5 GB quota per user, and a basic file explorer.</p>
+        <section class="auth-page">
+          <div class="auth-brand">
+            <div class="brand-lockup">
+              <span class="logo-mark"></span>
+              <span>SkyVault</span>
+            </div>
+            <h1>Your private file space.</h1>
+            <p>Email verification, local storage, and a focused browser workspace.</p>
           </div>
 
-          <form class="panel auth-panel" method="post" action="{{action}}">
+          <form class="auth-card" method="post" action="{{action}}">
             <h2>{{title}}</h2>
             {{alert}}
-            <label>Email</label>
-            <input name="email" type="email" autocomplete="email" required maxlength="254">
-            <label>Password</label>
-            <input name="password" type="password" autocomplete="{{passwordAuto}}" required minlength="4">
+            <label for="email">Email</label>
+            <input id="email" name="email" type="email" autocomplete="email" required maxlength="254">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="{{passwordAuto}}" required minlength="4">
             <button type="submit">{{button}}</button>
             <p class="switch">{{switchText}} <a href="{{switchLink}}">{{switchLabel}}</a></p>
           </form>
@@ -70,24 +80,25 @@ public static class PageRenderer
 
     private static string RenderVerificationPanel(string email, string? message)
     {
-        string alert = string.IsNullOrWhiteSpace(message)
-            ? ""
-            : $"""<div class="alert">{Escape(message)}</div>""";
+        string alert = RenderAlert(message);
 
         return $$"""
-        <section class="auth-shell">
-          <div class="brand">
-            <p class="eyebrow">Email verification</p>
-            <h1>SkyVault</h1>
-            <p>Enter the code sent to {{Escape(email)}} to finish creating the account.</p>
+        <section class="auth-page">
+          <div class="auth-brand">
+            <div class="brand-lockup">
+              <span class="logo-mark"></span>
+              <span>SkyVault</span>
+            </div>
+            <h1>Check your inbox.</h1>
+            <p>Enter the verification code sent to {{Escape(email)}}.</p>
           </div>
 
-          <form class="panel auth-panel" method="post" action="/verify">
+          <form class="auth-card" method="post" action="/verify">
             <h2>Verify email</h2>
             {{alert}}
             <input name="email" type="hidden" value="{{Escape(email)}}">
-            <label>Code from email</label>
-            <input name="code" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="6" pattern="[0-9]{6}">
+            <label for="code">Code from email</label>
+            <input id="code" name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="6" pattern="[0-9]{6}">
             <button type="submit">Verify</button>
             <p class="switch"><a href="/?mode=register">Register again</a></p>
           </form>
@@ -98,72 +109,114 @@ public static class PageRenderer
     private static string RenderDashboard(UserAccount account, IReadOnlyList<FileEntry> files, string? message)
     {
         double usedPercent = account.QuotaBytes == 0 ? 0 : account.UsedBytes * 100.0 / account.QuotaBytes;
+        usedPercent = Math.Clamp(usedPercent, 0, 100);
+        string usedPercentText = usedPercent.ToString("0.##", CultureInfo.InvariantCulture);
         string rows = files.Count == 0
-            ? """<tr><td colspan="3" class="empty">No files yet.</td></tr>"""
+            ? """<tr class="empty-row"><td colspan="3">No files yet.</td></tr>"""
             : string.Join("\n", files.Select(RenderFileRow));
-        string alert = string.IsNullOrWhiteSpace(message)
-            ? ""
-            : $"""<div class="alert success">{Escape(message)}</div>""";
+        string alert = RenderAlert(message, success: true);
+        string accountInitial = GetInitial(account.Username);
 
         return $$"""
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">SkyVault</p>
-            <h1>Explorer</h1>
-          </div>
-          <form method="post" action="/logout">
-            <button class="secondary" type="submit">Logout</button>
-          </form>
-        </header>
-
-        {{alert}}
-
-        <section class="dashboard">
-          <aside class="panel account-card">
-            <h2>{{Escape(account.Username)}}</h2>
-            <div class="meter">
-              <span style="width: {{usedPercent:0.##}}%"></span>
+        <section class="app-shell">
+          <aside class="sidebar">
+            <div class="brand-lockup">
+              <span class="logo-mark"></span>
+              <span>SkyVault</span>
             </div>
-            <p>{{FormatBytes(account.UsedBytes)}} used of {{FormatBytes(account.QuotaBytes)}}.</p>
+
+            <form class="upload-panel" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
+              <label class="file-picker" for="fileInput">
+                <span class="file-picker-icon">+</span>
+                <span>New upload</span>
+              </label>
+              <input name="file" id="fileInput" type="file" required>
+              <button type="submit">Upload</button>
+              <div class="upload-status">
+                <div class="progress">
+                  <span id="progressBar"></span>
+                </div>
+                <p id="uploadInfo">No upload running.</p>
+              </div>
+            </form>
+
+            <nav class="nav-list" aria-label="SkyVault sections">
+              <a class="nav-item active" href="/">
+                <span class="nav-icon home-icon"></span>
+                <span>Home</span>
+              </a>
+              <a class="nav-item" href="/">
+                <span class="nav-icon folder-icon"></span>
+                <span>My files</span>
+              </a>
+              <a class="nav-item" href="/">
+                <span class="nav-icon clock-icon"></span>
+                <span>Recent</span>
+              </a>
+            </nav>
+
+            <div class="storage-summary">
+              <div class="meter">
+                <span style="width: {{usedPercentText}}%"></span>
+              </div>
+              <p>{{FormatBytes(account.UsedBytes)}} of {{FormatBytes(account.QuotaBytes)}} used</p>
+            </div>
           </aside>
 
-          <section class="panel explorer">
-            <div class="section-head">
-              <h2>Files</h2>
-              <span>{{files.Count}} item(s)</span>
-            </div>
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Size</th>
-                  <th>Modified</th>
-                </tr>
-              </thead>
-              <tbody>
-                {{rows}}
-              </tbody>
-            </table>
-          </section>
-
-          <form class="panel upload-file" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
-            <h2>Upload file</h2>
-            <label>Choose file</label>
-            <input name="file" id="fileInput" type="file" required>
-            <div class="upload-status">
-              <div class="progress">
-                <span id="progressBar"></span>
+          <main class="workspace">
+            <header class="workspace-top">
+              <label class="search-box">
+                <span class="search-icon"></span>
+                <input id="fileSearch" type="search" placeholder="Search files" autocomplete="off">
+              </label>
+              <div class="account-menu">
+                <span class="account-email">{{Escape(account.Username)}}</span>
+                <span class="avatar">{{Escape(accountInitial)}}</span>
+                <form method="post" action="/logout">
+                  <button class="secondary" type="submit">Logout</button>
+                </form>
               </div>
-              <p id="uploadInfo">No upload running.</p>
-            </div>
-            <button type="submit">Upload</button>
-          </form>
+            </header>
+
+            {{alert}}
+
+            <section class="files-panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Workspace</p>
+                  <h1>My files</h1>
+                </div>
+                <span>{{files.Count}} item(s)</span>
+              </div>
+
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                  </tr>
+                </thead>
+                <tbody id="fileRows">
+                  {{rows}}
+                </tbody>
+              </table>
+              <p class="empty-filter" id="emptyFilter">No matching files.</p>
+            </section>
+          </main>
         </section>
         <script>
           const form = document.getElementById('uploadForm');
           const input = document.getElementById('fileInput');
           const bar = document.getElementById('progressBar');
           const info = document.getElementById('uploadInfo');
+          const search = document.getElementById('fileSearch');
+          const rows = Array.from(document.querySelectorAll('#fileRows tr[data-file-name]'));
+          const emptyFilter = document.getElementById('emptyFilter');
+
+          input.addEventListener('change', () => {
+            info.textContent = input.files.length ? input.files[0].name : 'No upload running.';
+          });
 
           form.addEventListener('submit', (event) => {
             event.preventDefault();
@@ -206,6 +259,22 @@ public static class PageRenderer
             request.send(data);
           });
 
+          search.addEventListener('input', () => {
+            const query = search.value.trim().toLowerCase();
+            let visible = 0;
+
+            rows.forEach((row) => {
+              const match = row.dataset.fileName.includes(query);
+              row.hidden = !match;
+
+              if (match) {
+                visible += 1;
+              }
+            });
+
+            emptyFilter.style.display = rows.length && !visible ? 'block' : 'none';
+          });
+
           function formatBytes(bytes) {
             if (bytes >= 1024 * 1024) {
               return (bytes / 1024 / 1024).toFixed(2) + ' MB';
@@ -224,8 +293,13 @@ public static class PageRenderer
     private static string RenderFileRow(FileEntry file)
     {
         return $$"""
-        <tr>
-          <td>{{Escape(file.Name)}}</td>
+        <tr data-file-name="{{Escape(file.Name.ToLowerInvariant())}}">
+          <td>
+            <span class="file-name">
+              <span class="file-icon"></span>
+              <span>{{Escape(file.Name)}}</span>
+            </span>
+          </td>
           <td>{{FormatBytes(file.SizeBytes)}}</td>
           <td>{{file.ModifiedAt.LocalDateTime:g}}</td>
         </tr>
@@ -242,82 +316,163 @@ public static class PageRenderer
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <title>SkyVault</title>
           <style>
+            :root {
+              --bg: #f7f9fc;
+              --surface: #ffffff;
+              --surface-soft: #eef4ff;
+              --line: #dfe5ef;
+              --line-strong: #c8d2e1;
+              --text: #1f2937;
+              --muted: #64748b;
+              --blue: #2563eb;
+              --blue-soft: #dbeafe;
+              --green: #10b981;
+              --amber: #f59e0b;
+              --shadow: 0 18px 38px rgba(31, 41, 55, 0.10);
+            }
+
             * { box-sizing: border-box; }
+
             body {
               margin: 0;
               min-height: 100vh;
               font-family: Arial, sans-serif;
-              background: #eef2f7;
-              color: #172033;
+              background: var(--bg);
+              color: var(--text);
             }
+
+            body, input, button {
+              font-size: 15px;
+            }
+
             main {
-              width: min(1120px, calc(100% - 32px));
-              margin: 0 auto;
-              padding: 48px 0;
+              min-height: 100vh;
             }
-            h1, h2, p { margin-top: 0; }
-            h1 { margin-bottom: 10px; font-size: 44px; line-height: 1.1; }
-            h2 { margin-bottom: 18px; font-size: 23px; }
-            p { color: #536071; font-size: 16px; line-height: 1.5; }
-            a { color: #1769e0; font-weight: 700; text-decoration: none; }
-            .eyebrow {
-              margin-bottom: 8px;
-              color: #1769e0;
-              font-size: 13px;
-              font-weight: 800;
-              letter-spacing: 0;
-              text-transform: uppercase;
+
+            h1, h2, p {
+              margin-top: 0;
             }
-            .auth-shell {
-              min-height: calc(100vh - 96px);
-              display: grid;
-              grid-template-columns: 1fr 390px;
-              gap: 44px;
+
+            h1 {
+              margin-bottom: 6px;
+              font-size: 30px;
+              line-height: 1.15;
+              font-weight: 700;
+            }
+
+            h2 {
+              margin-bottom: 20px;
+              font-size: 24px;
+              line-height: 1.2;
+            }
+
+            p {
+              color: var(--muted);
+              line-height: 1.5;
+            }
+
+            a {
+              color: var(--blue);
+              font-weight: 700;
+              text-decoration: none;
+            }
+
+            .brand-lockup {
+              display: inline-flex;
               align-items: center;
+              gap: 11px;
+              font-size: 20px;
+              font-weight: 700;
             }
-            .brand p:last-child { max-width: 560px; font-size: 19px; }
-            .panel {
-              background: #ffffff;
-              border: 1px solid #d7dee8;
+
+            .logo-mark {
+              position: relative;
+              display: inline-block;
+              width: 34px;
+              height: 34px;
+              flex: 0 0 auto;
               border-radius: 8px;
-              padding: 24px;
-              box-shadow: 0 10px 24px rgba(20, 30, 50, 0.08);
+              background:
+                linear-gradient(135deg, var(--green) 0 46%, transparent 47%),
+                linear-gradient(225deg, #60a5fa 0 46%, transparent 47%),
+                linear-gradient(315deg, var(--blue) 0 46%, transparent 47%);
+              box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);
             }
-            .narrow { max-width: 520px; margin: 0 auto; }
+
+            .auth-page {
+              min-height: 100vh;
+              display: grid;
+              grid-template-columns: minmax(0, 1fr) 390px;
+              gap: 48px;
+              align-items: center;
+              width: min(1080px, calc(100% - 40px));
+              margin: 0 auto;
+              padding: 44px 0;
+            }
+
+            .auth-brand h1 {
+              max-width: 520px;
+              margin-top: 42px;
+              font-size: 48px;
+            }
+
+            .auth-brand p {
+              max-width: 520px;
+              font-size: 18px;
+            }
+
+            .auth-card {
+              background: var(--surface);
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              padding: 30px;
+              box-shadow: var(--shadow);
+            }
+
             .alert {
               margin-bottom: 18px;
               padding: 13px 15px;
               border-radius: 8px;
-              background: #fff4d6;
-              border: 1px solid #f2d27a;
-              color: #604500;
+              background: #fff7ed;
+              border: 1px solid #fed7aa;
+              color: #7c2d12;
             }
+
             .alert.success {
-              background: #eaf8ef;
-              border-color: #9bd5ae;
-              color: #155724;
+              background: #ecfdf5;
+              border-color: #a7f3d0;
+              color: #065f46;
             }
+
             label {
               display: block;
-              margin: 14px 0 6px;
-              color: #263244;
+              margin: 15px 0 7px;
+              color: #334155;
               font-weight: 700;
             }
-            input, textarea {
+
+            input {
               width: 100%;
-              border: 1px solid #b8c2d1;
-              border-radius: 6px;
-              padding: 0 12px;
+              height: 44px;
+              border: 1px solid var(--line-strong);
+              border-radius: 8px;
+              padding: 0 13px;
               font: inherit;
-              color: #172033;
+              color: var(--text);
               background: white;
             }
-            input { height: 42px; }
-            textarea { min-height: 150px; padding-top: 10px; resize: vertical; }
-            input[type="file"] {
-              height: auto;
-              padding: 10px;
+
+            input:focus {
+              outline: 2px solid var(--blue-soft);
+              border-color: var(--blue);
             }
+
+            .code-input {
+              text-align: center;
+              font-size: 22px;
+              font-weight: 700;
+            }
+
             button, .button {
               display: inline-flex;
               align-items: center;
@@ -326,88 +481,458 @@ public static class PageRenderer
               margin-top: 18px;
               padding: 0 18px;
               border: 0;
-              border-radius: 6px;
-              background: #1769e0;
+              border-radius: 8px;
+              background: var(--blue);
               color: white;
-              font-size: 16px;
+              font: inherit;
               font-weight: 700;
               text-decoration: none;
               cursor: pointer;
             }
+
             .secondary {
               margin-top: 0;
-              background: #e8eef7;
-              color: #172033;
+              background: #eef2f7;
+              color: var(--text);
             }
-            .switch { margin: 16px 0 0; font-size: 15px; }
-            .topbar {
+
+            .switch {
+              margin: 16px 0 0;
+              font-size: 14px;
+            }
+
+            .app-shell {
+              min-height: 100vh;
+              display: grid;
+              grid-template-columns: 256px minmax(0, 1fr);
+              background: var(--bg);
+            }
+
+            .sidebar {
+              display: flex;
+              flex-direction: column;
+              gap: 18px;
+              padding: 22px 16px;
+              border-right: 1px solid var(--line);
+              background: #f4f7fb;
+            }
+
+            .upload-panel {
+              display: grid;
+              gap: 12px;
+              margin-top: 10px;
+            }
+
+            .upload-panel input[type="file"] {
+              position: absolute;
+              width: 1px;
+              height: 1px;
+              overflow: hidden;
+              clip: rect(0, 0, 0, 0);
+            }
+
+            .file-picker {
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              min-height: 52px;
+              margin: 0;
+              padding: 0 16px;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface);
+              box-shadow: 0 8px 18px rgba(31, 41, 55, 0.08);
+              cursor: pointer;
+            }
+
+            .file-picker-icon {
+              display: grid;
+              place-items: center;
+              width: 28px;
+              height: 28px;
+              border-radius: 8px;
+              background: var(--blue);
+              color: white;
+              font-size: 22px;
+              line-height: 1;
+            }
+
+            .upload-panel button {
+              width: 100%;
+              margin-top: 0;
+            }
+
+            .upload-status {
+              display: grid;
+              gap: 8px;
+            }
+
+            .upload-status p {
+              margin: 0;
+              font-size: 13px;
+              word-break: break-word;
+            }
+
+            .progress,
+            .meter {
+              height: 8px;
+              overflow: hidden;
+              border-radius: 999px;
+              background: #dce4ef;
+            }
+
+            .progress span,
+            .meter span {
+              display: block;
+              width: 0;
+              height: 100%;
+              background: linear-gradient(90deg, var(--blue), var(--green));
+            }
+
+            .nav-list {
+              display: grid;
+              gap: 4px;
+              margin-top: 4px;
+            }
+
+            .nav-item {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+              min-height: 42px;
+              padding: 0 12px;
+              border-radius: 999px;
+              color: #334155;
+              font-weight: 700;
+            }
+
+            .nav-item.active {
+              background: var(--blue-soft);
+              color: #0f3b80;
+            }
+
+            .nav-icon,
+            .file-icon,
+            .search-icon {
+              position: relative;
+              display: inline-block;
+              flex: 0 0 auto;
+            }
+
+            .home-icon {
+              width: 16px;
+              height: 16px;
+              border-radius: 4px;
+              background: #0f3b80;
+              transform: rotate(45deg);
+            }
+
+            .home-icon::after {
+              content: "";
+              position: absolute;
+              left: 4px;
+              top: 4px;
+              width: 8px;
+              height: 8px;
+              background: #0f3b80;
+              transform: rotate(-45deg);
+            }
+
+            .folder-icon {
+              width: 18px;
+              height: 14px;
+              border: 2px solid currentColor;
+              border-radius: 3px;
+            }
+
+            .folder-icon::before {
+              content: "";
+              position: absolute;
+              left: 1px;
+              top: -5px;
+              width: 8px;
+              height: 5px;
+              border: 2px solid currentColor;
+              border-bottom: 0;
+              border-radius: 3px 3px 0 0;
+            }
+
+            .clock-icon {
+              width: 18px;
+              height: 18px;
+              border: 2px solid currentColor;
+              border-radius: 50%;
+            }
+
+            .clock-icon::before {
+              content: "";
+              position: absolute;
+              left: 7px;
+              top: 3px;
+              width: 2px;
+              height: 6px;
+              background: currentColor;
+            }
+
+            .clock-icon::after {
+              content: "";
+              position: absolute;
+              left: 7px;
+              top: 8px;
+              width: 6px;
+              height: 2px;
+              background: currentColor;
+            }
+
+            .storage-summary {
+              margin-top: auto;
+              padding: 12px;
+            }
+
+            .storage-summary p {
+              margin: 9px 0 0;
+              font-size: 13px;
+            }
+
+            .workspace {
+              display: grid;
+              grid-template-rows: auto auto 1fr;
+              gap: 18px;
+              min-width: 0;
+              padding: 18px 22px 28px;
+            }
+
+            .workspace-top {
+              display: grid;
+              grid-template-columns: minmax(260px, 760px) auto;
+              gap: 18px;
+              align-items: center;
+            }
+
+            .search-box {
+              position: relative;
+              margin: 0;
+            }
+
+            .search-box input {
+              height: 50px;
+              padding-left: 44px;
+              border: 0;
+              background: #e8eef7;
+              border-radius: 999px;
+            }
+
+            .search-icon {
+              position: absolute;
+              left: 18px;
+              top: 16px;
+              width: 14px;
+              height: 14px;
+              border: 2px solid #475569;
+              border-radius: 50%;
+            }
+
+            .search-icon::after {
+              content: "";
+              position: absolute;
+              right: -6px;
+              bottom: -5px;
+              width: 8px;
+              height: 2px;
+              border-radius: 999px;
+              background: #475569;
+              transform: rotate(45deg);
+            }
+
+            .account-menu {
+              display: flex;
+              align-items: center;
+              justify-content: flex-end;
+              gap: 10px;
+              min-width: 0;
+            }
+
+            .account-email {
+              max-width: 250px;
+              overflow: hidden;
+              color: var(--muted);
+              font-size: 14px;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .avatar {
+              display: grid;
+              place-items: center;
+              width: 36px;
+              height: 36px;
+              border-radius: 50%;
+              background: #0f766e;
+              color: white;
+              font-weight: 800;
+            }
+
+            .files-panel {
+              min-width: 0;
+              overflow: hidden;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface);
+              box-shadow: 0 8px 24px rgba(31, 41, 55, 0.06);
+            }
+
+            .section-head {
               display: flex;
               align-items: center;
               justify-content: space-between;
               gap: 18px;
-              margin-bottom: 22px;
+              padding: 24px 26px 16px;
             }
-            .dashboard {
-              display: grid;
-              grid-template-columns: 280px 1fr;
-              gap: 18px;
-              align-items: start;
+
+            .section-head .eyebrow {
+              margin-bottom: 4px;
+              color: var(--blue);
+              font-size: 12px;
+              font-weight: 800;
+              text-transform: uppercase;
             }
-            .account-card { position: sticky; top: 18px; }
-            .meter {
-              height: 16px;
-              overflow: hidden;
-              border-radius: 999px;
-              background: #dbe3ef;
+
+            .section-head span {
+              color: var(--muted);
+              font-size: 14px;
+              white-space: nowrap;
             }
-            .meter span {
-              display: block;
-              height: 100%;
-              background: #1769e0;
-            }
-            .explorer { overflow-x: auto; }
-            .section-head {
-              display: flex;
-              justify-content: space-between;
-              gap: 16px;
-              align-items: baseline;
-            }
-            .section-head span { color: #6b7280; font-size: 14px; }
+
             table {
               width: 100%;
               border-collapse: collapse;
             }
+
             th, td {
-              padding: 12px 10px;
-              border-bottom: 1px solid #e2e8f0;
+              padding: 13px 26px;
+              border-top: 1px solid #edf1f7;
               text-align: left;
               white-space: nowrap;
             }
-            th { color: #536071; font-size: 13px; text-transform: uppercase; }
-            .empty { color: #6b7280; text-align: center; }
-            .upload-file { grid-column: 2; }
-            .upload-status { margin-top: 16px; }
-            .progress {
-              height: 14px;
-              overflow: hidden;
-              border-radius: 999px;
-              background: #dbe3ef;
+
+            th {
+              color: var(--muted);
+              font-size: 12px;
+              font-weight: 800;
+              text-transform: uppercase;
             }
-            .progress span {
-              display: block;
-              width: 0;
-              height: 100%;
-              background: #1769e0;
-              transition: width 0.12s linear;
+
+            tbody tr:hover {
+              background: #f8fafc;
             }
-            #uploadInfo { margin: 8px 0 0; font-size: 14px; }
-            @media (max-width: 820px) {
-              main { padding: 28px 0; }
-              h1 { font-size: 34px; }
-              .auth-shell, .dashboard { grid-template-columns: 1fr; }
-              .upload-file { grid-column: auto; }
-              .account-card { position: static; }
-              .topbar { align-items: flex-start; }
+
+            .file-name {
+              display: inline-flex;
+              align-items: center;
+              gap: 11px;
+              min-width: 0;
+              font-weight: 700;
+            }
+
+            .file-icon {
+              width: 22px;
+              height: 26px;
+              border: 2px solid #94a3b8;
+              border-radius: 4px;
+              background: #f8fafc;
+            }
+
+            .file-icon::after {
+              content: "";
+              position: absolute;
+              right: -2px;
+              top: -2px;
+              width: 8px;
+              height: 8px;
+              border-left: 2px solid #94a3b8;
+              border-bottom: 2px solid #94a3b8;
+              background: #eef2f7;
+              border-radius: 0 3px 0 3px;
+            }
+
+            .empty-row td,
+            .empty-filter {
+              color: var(--muted);
+              text-align: center;
+            }
+
+            .empty-row td {
+              padding: 72px 24px;
+            }
+
+            .empty-filter {
+              display: none;
+              margin: 0;
+              padding: 52px 24px;
+              border-top: 1px solid #edf1f7;
+            }
+
+            @media (max-width: 900px) {
+              .app-shell {
+                grid-template-columns: 1fr;
+              }
+
+              .sidebar {
+                position: static;
+                border-right: 0;
+                border-bottom: 1px solid var(--line);
+              }
+
+              .nav-list {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+              }
+
+              .nav-item {
+                justify-content: center;
+              }
+
+              .storage-summary {
+                margin-top: 0;
+              }
+
+              .workspace-top {
+                grid-template-columns: 1fr;
+              }
+
+              .account-menu {
+                justify-content: space-between;
+              }
+            }
+
+            @media (max-width: 720px) {
+              .auth-page {
+                grid-template-columns: 1fr;
+                width: min(100% - 28px, 520px);
+                gap: 24px;
+              }
+
+              .auth-brand h1 {
+                margin-top: 26px;
+                font-size: 36px;
+              }
+
+              .workspace {
+                padding: 14px;
+              }
+
+              .section-head {
+                align-items: flex-start;
+                flex-direction: column;
+              }
+
+              th:nth-child(3),
+              td:nth-child(3) {
+                display: none;
+              }
+
+              th, td {
+                padding: 12px 16px;
+              }
             }
           </style>
         </head>
@@ -418,6 +943,23 @@ public static class PageRenderer
         </body>
         </html>
         """;
+    }
+
+    private static string RenderAlert(string? message, bool success = false)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return "";
+        }
+
+        string className = success ? "alert success" : "alert";
+        return $"""<div class="{className}">{Escape(message)}</div>""";
+    }
+
+    private static string GetInitial(string email)
+    {
+        char first = email.Trim().FirstOrDefault(char.IsLetterOrDigit);
+        return first == default ? "S" : char.ToUpperInvariant(first).ToString();
     }
 
     private static string Escape(string value)
