@@ -1,0 +1,18 @@
+SkyVault log
+
+2026-06-03
+- Zawężona walidacja nazw plikow była zbyt ostra dla kolekcji muzyki.
+- Poluzowano walidację tak, aby akceptowała zwykle znaki używane w nazwach audio, zostawiając blokadę na separatory ścieżek i znaki kontrolne.
+- Dodano mechanizm przenoszenia plików i folderów z podglądem konfliktu nazw.
+- Wprowadzono miniaturę przeciągania zamiast dużego podglądu całego obiektu.
+[2026-06-03 18:57:23 UTC] INFO: SkyVault is running.
+[2026-06-03 18:57:23 UTC] INFO: Build: V.0.1.0
+[2026-06-03 18:57:23 UTC] INFO: Open: http://127.0.0.1:18080
+[2026-06-03 18:57:23 UTC] INFO: Data directory: data
+[2026-06-03 18:57:23 UTC] INFO: Storage mode: single
+[2026-06-03 18:57:23 UTC] INFO: Storage locations: data/files
+[2026-06-03 18:57:23 UTC] INFO: User files are stored in: <storage location>/<email>/
+[2026-06-03 18:57:23 UTC] INFO: Default user quota: 5 GB
+[2026-06-03 18:57:23 UTC] INFO: CPU cores visible to .NET: 2
+[2026-06-03 18:57:23 UTC] INFO: Configured RAM limit: 1024 MB
+[2026-06-03 18:57:23 UTC] INFO: Press Ctrl+C to stop the server.
