@@ -175,10 +175,11 @@ public static class PageRenderer
         usedPercent = Math.Clamp(usedPercent, 0, 100);
         string usedPercentText = usedPercent.ToString("0.##", CultureInfo.InvariantCulture);
         string rows = files.Count == 0
-            ? """<tr class="empty-row"><td colspan="3">No files yet.</td></tr>"""
+            ? """<tr class="empty-row"><td colspan="4">No files yet.</td></tr>"""
             : string.Join("\n", files.Select(RenderFileRow));
         string alert = RenderAlert(message, success: true);
         string accountInitial = GetInitial(account.Username);
+        string uploadInfo = message is null ? "No upload running." : Escape(message);
 
         return $$"""
         <section class="app-shell">
@@ -187,19 +188,13 @@ public static class PageRenderer
               <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
             </div>
 
-            <form class="upload-panel" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
-              <label class="file-picker" for="fileInput">
-                <span class="file-picker-icon">+</span>
-                <span>New upload</span>
-              </label>
+            <form class="upload-panel compact-upload" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
               <input name="file" id="fileInput" type="file" multiple required>
               <input name="folder" id="folderInput" type="file" webkitdirectory directory multiple>
-              <button type="submit">Upload</button>
               <div class="upload-status">
                 <div class="progress">
                   <span id="progressBar"></span>
                 </div>
-                <p id="uploadInfo">No upload running.</p>
               </div>
             </form>
 
@@ -219,6 +214,7 @@ public static class PageRenderer
             </nav>
 
             <div class="storage-summary">
+              <p id="uploadInfo">{{uploadInfo}}</p>
               <div class="meter">
                 <span style="width: {{usedPercentText}}%"></span>
               </div>
@@ -249,15 +245,20 @@ public static class PageRenderer
                   <p class="eyebrow">Workspace</p>
                   <h1>My files</h1>
                 </div>
-                <span>{{files.Count}} item(s)</span>
+                <div class="file-actions">
+                  <span>{{files.Count}} item(s)</span>
+                </div>
               </div>
 
               <table>
                 <thead>
                   <tr>
-                    <th>Name</th>
-                    <th>Size</th>
-                    <th>Modified</th>
+                    <th class="select-column">
+                      <input id="selectAllFiles" type="checkbox" aria-label="Select all files">
+                    </th>
+                    <th><button class="sort-button" type="button" data-sort="name">Name</button></th>
+                    <th><button class="sort-button" type="button" data-sort="size">Size</button></th>
+                    <th><button class="sort-button active" type="button" data-sort="modified">Modified</button></th>
                   </tr>
                 </thead>
                 <tbody id="fileRows">
@@ -285,6 +286,14 @@ public static class PageRenderer
             <span class="context-icon new-folder-icon"></span>
             <span>New folder</span>
           </button>
+          <button type="button" data-action="download-zip">
+            <span class="context-icon download-zip-icon"></span>
+            <span>Download ZIP</span>
+          </button>
+          <button type="button" data-action="move-trash">
+            <span class="context-icon trash-icon"></span>
+            <span>Move to trash</span>
+          </button>
         </div>
         <script>
           const form = document.getElementById('uploadForm');
@@ -297,8 +306,19 @@ public static class PageRenderer
           const emptyFilter = document.getElementById('emptyFilter');
           const filesPanel = document.getElementById('filesPanel');
           const contextMenu = document.getElementById('contextMenu');
+          const selectAllFiles = document.getElementById('selectAllFiles');
+          const fileChecks = Array.from(document.querySelectorAll('.file-check'));
+          const sortButtons = Array.from(document.querySelectorAll('.sort-button'));
+          const fileRows = document.getElementById('fileRows');
+          let currentSort = 'modified';
+          let sortDirection = 'desc';
           let autoUploadAfterPick = false;
           let dragDepth = 0;
+          let selectionAnchor = null;
+          let pointerSelecting = false;
+          let pointerMode = true;
+
+          sortRows();
 
           input.addEventListener('change', () => {
             info.textContent = describeFiles(input.files);
@@ -343,6 +363,89 @@ public static class PageRenderer
             });
 
             emptyFilter.style.display = rows.length && !visible ? 'block' : 'none';
+            updateSelectedFiles();
+          });
+
+          sortButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+              const sort = button.dataset.sort;
+
+              if (currentSort === sort) {
+                sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+              } else {
+                currentSort = sort;
+                sortDirection = sort === 'modified' ? 'desc' : 'asc';
+              }
+
+              sortRows();
+            });
+          });
+
+          if (selectAllFiles) {
+            selectAllFiles.addEventListener('change', () => {
+              fileChecks.forEach((check) => {
+                if (!check.disabled && !check.closest('tr').hidden) {
+                  setRowSelected(check.closest('tr'), selectAllFiles.checked);
+                }
+              });
+              updateSelectedFiles();
+            });
+          }
+
+          fileChecks.forEach((check) => {
+            const row = check.closest('tr');
+
+            check.addEventListener('click', (event) => {
+              event.stopPropagation();
+            });
+
+            check.addEventListener('change', () => {
+              setRowSelected(row, check.checked);
+              updateSelectedFiles();
+            });
+
+            row.addEventListener('mousedown', (event) => {
+              if (event.button !== 0 || event.target.closest('a, input, button')) {
+                return;
+              }
+
+              event.preventDefault();
+              pointerSelecting = true;
+              pointerMode = event.ctrlKey || event.metaKey ? !check.checked : true;
+              applyRowSelection(row, event);
+            });
+
+            row.addEventListener('mouseenter', (event) => {
+              if (!pointerSelecting) {
+                return;
+              }
+
+              event.preventDefault();
+              setRowSelected(row, pointerMode);
+              updateSelectedFiles();
+            });
+          });
+
+          document.addEventListener('mouseup', () => {
+            pointerSelecting = false;
+          });
+
+          rows.forEach((row) => {
+            row.addEventListener('contextmenu', (event) => {
+              event.preventDefault();
+              const check = row.querySelector('.file-check');
+
+              if (check && !check.checked) {
+                fileChecks.forEach((item) => {
+                  setRowSelected(item.closest('tr'), false);
+                });
+                setRowSelected(row, true);
+                selectionAnchor = row;
+                updateSelectedFiles();
+              }
+
+              showContextMenu(event.clientX, event.clientY);
+            });
           });
 
           document.addEventListener('dragenter', (event) => {
@@ -392,6 +495,10 @@ public static class PageRenderer
           });
 
           filesPanel.addEventListener('contextmenu', (event) => {
+            if (event.target.closest('tr[data-file-name]')) {
+              return;
+            }
+
             event.preventDefault();
             showContextMenu(event.clientX, event.clientY);
           });
@@ -436,6 +543,16 @@ public static class PageRenderer
 
             if (action === 'new-folder') {
               await createRemoteItem('/folders/create', 'folderName', 'Folder name');
+              return;
+            }
+
+            if (action === 'download-zip') {
+              downloadSelectedZip();
+              return;
+            }
+
+            if (action === 'move-trash') {
+              await moveSelectedToTrash();
             }
           });
 
@@ -628,6 +745,160 @@ public static class PageRenderer
             contextMenu.hidden = true;
           }
 
+          function updateSelectedFiles() {
+            const selected = fileChecks.filter((check) => check.checked && !check.disabled).length;
+
+            if (selectAllFiles) {
+              const enabled = fileChecks.filter((check) => !check.disabled && !check.closest('tr').hidden);
+              selectAllFiles.checked = enabled.length > 0 && enabled.every((check) => check.checked);
+              selectAllFiles.indeterminate = selected > 0 && !selectAllFiles.checked;
+            }
+          }
+
+          function applyRowSelection(row, event) {
+            const check = row.querySelector('.file-check');
+
+            if (!check || check.disabled) {
+              return;
+            }
+
+            if (event.shiftKey && selectionAnchor) {
+              selectRange(selectionAnchor, row);
+              updateSelectedFiles();
+              return;
+            }
+
+            if (!event.ctrlKey && !event.metaKey) {
+              clearSelection();
+            }
+
+            setRowSelected(row, event.ctrlKey || event.metaKey ? !check.checked : true);
+            selectionAnchor = row;
+            updateSelectedFiles();
+          }
+
+          function selectRange(fromRow, toRow) {
+            const visibleRows = rows.filter((row) => !row.hidden && row.querySelector('.file-check'));
+            const from = visibleRows.indexOf(fromRow);
+            const to = visibleRows.indexOf(toRow);
+
+            if (from < 0 || to < 0) {
+              return;
+            }
+
+            clearSelection();
+            const start = Math.min(from, to);
+            const end = Math.max(from, to);
+
+            for (let index = start; index <= end; index += 1) {
+              setRowSelected(visibleRows[index], true);
+            }
+          }
+
+          function clearSelection() {
+            fileChecks.forEach((check) => {
+              setRowSelected(check.closest('tr'), false);
+            });
+          }
+
+          function setRowSelected(row, selected) {
+            const check = row.querySelector('.file-check');
+
+            if (!check || check.disabled) {
+              return;
+            }
+
+            check.checked = selected;
+            row.classList.toggle('is-selected', selected);
+          }
+
+          function downloadSelectedZip() {
+            const paths = getSelectedPaths();
+
+            if (!paths.length) {
+              info.textContent = 'Select files first.';
+              return;
+            }
+
+            const zipForm = document.createElement('form');
+            zipForm.method = 'post';
+            zipForm.action = '/files/download-zip';
+            const field = document.createElement('input');
+            field.type = 'hidden';
+            field.name = 'paths';
+            field.value = paths.join('\n');
+            zipForm.appendChild(field);
+            document.body.appendChild(zipForm);
+            zipForm.submit();
+            zipForm.remove();
+          }
+
+          async function moveSelectedToTrash() {
+            const paths = getSelectedPaths();
+
+            if (!paths.length) {
+              info.textContent = 'Select files first.';
+              return;
+            }
+
+            if (!confirm('Move selected file(s) to trash?')) {
+              return;
+            }
+
+            const data = new URLSearchParams();
+            data.set('paths', paths.join('\n'));
+
+            try {
+              const response = await fetch('/files/trash', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: data.toString()
+              });
+              const html = await response.text();
+              document.open();
+              document.write(html);
+              document.close();
+            } catch {
+              info.textContent = 'Could not move files to trash.';
+            }
+          }
+
+          function getSelectedPaths() {
+            return fileChecks
+              .filter((check) => check.checked && !check.disabled)
+              .map((check) => check.value);
+          }
+
+          function sortRows() {
+            const sorted = [...rows].sort((left, right) => {
+              const leftKind = left.dataset.entryKind === 'folder' ? 0 : 1;
+              const rightKind = right.dataset.entryKind === 'folder' ? 0 : 1;
+
+              if (leftKind !== rightKind) {
+                return leftKind - rightKind;
+              }
+
+              let result = 0;
+
+              if (currentSort === 'name') {
+                result = left.dataset.sortName.localeCompare(right.dataset.sortName);
+              } else if (currentSort === 'size') {
+                result = Number(left.dataset.sortSize) - Number(right.dataset.sortSize);
+              } else {
+                result = Number(left.dataset.sortModified) - Number(right.dataset.sortModified);
+              }
+
+              return sortDirection === 'asc' ? result : -result;
+            });
+
+            sorted.forEach((row) => fileRows.appendChild(row));
+            sortButtons.forEach((button) => {
+              button.classList.toggle('active', button.dataset.sort === currentSort);
+              button.textContent = button.dataset.sort[0].toUpperCase() + button.dataset.sort.slice(1)
+                + (button.dataset.sort === currentSort ? (sortDirection === 'asc' ? ' asc' : ' desc') : '');
+            });
+          }
+
           function formatBytes(bytes) {
             if (bytes >= 1024 * 1024) {
               return (bytes / 1024 / 1024).toFixed(2) + ' MB';
@@ -647,13 +918,25 @@ public static class PageRenderer
     {
         string iconClass = file.IsFolder ? "folder-icon row-folder-icon" : "file-icon";
         string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
+        string encodedPath = WebUtility.UrlEncode(file.Name);
+        string checkbox = file.IsFolder
+            ? "<input type=\"checkbox\" disabled aria-label=\"Folders cannot be downloaded yet\">"
+            : $"<input class=\"file-check\" type=\"checkbox\" value=\"{Escape(file.Name)}\" aria-label=\"Select {Escape(file.Name)}\">";
+        string nameContent = file.IsFolder
+            ? Escape(file.Name)
+            : $"<a href=\"/files/download?path={encodedPath}\">{Escape(file.Name)}</a>";
+        string uploadedClass = !file.IsFolder && DateTimeOffset.UtcNow - file.ModifiedAt < TimeSpan.FromMinutes(5)
+            ? " class=\"fresh-upload\""
+            : "";
+        long modifiedUnix = file.ModifiedAt.ToUnixTimeSeconds();
 
         return $$"""
-        <tr data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}">
+        <tr{{uploadedClass}} data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}" data-sort-name="{{Escape(file.Name.ToLowerInvariant())}}" data-sort-size="{{file.SizeBytes}}" data-sort-modified="{{modifiedUnix}}">
+          <td class="select-column">{{checkbox}}</td>
           <td>
             <span class="file-name">
               <span class="{{iconClass}}"></span>
-              <span>{{Escape(file.Name)}}</span>
+              <span>{{nameContent}}</span>
             </span>
           </td>
           <td>{{size}}</td>
@@ -664,6 +947,8 @@ public static class PageRenderer
 
     private static string Layout(string content)
     {
+        string buildVersion = Escape(BuildInfo.Version);
+
         return $$"""
         <!doctype html>
         <html lang="en">
@@ -731,6 +1016,23 @@ public static class PageRenderer
               color: var(--blue);
               font-weight: 700;
               text-decoration: none;
+            }
+
+            .build-badge {
+              position: fixed;
+              left: 10px;
+              bottom: 8px;
+              z-index: 20;
+              padding: 4px 7px;
+              border: 1px solid rgba(148, 163, 184, 0.55);
+              border-radius: 6px;
+              background: rgba(255, 255, 255, 0.82);
+              color: #64748b;
+              font-size: 11px;
+              font-weight: 800;
+              letter-spacing: 0;
+              backdrop-filter: blur(6px);
+              pointer-events: none;
             }
 
             .brand-lockup {
@@ -871,6 +1173,11 @@ public static class PageRenderer
               display: grid;
               gap: 12px;
               margin-top: 10px;
+            }
+
+            .compact-upload {
+              gap: 8px;
+              margin-top: 8px;
             }
 
             .upload-panel input[type="file"] {
@@ -1044,6 +1351,13 @@ public static class PageRenderer
               font-size: 13px;
             }
 
+            .storage-summary #uploadInfo {
+              margin: 0 0 10px;
+              color: #047857;
+              font-weight: 700;
+              word-break: break-word;
+            }
+
             .workspace {
               display: grid;
               grid-template-rows: auto auto 1fr;
@@ -1174,9 +1488,24 @@ public static class PageRenderer
               white-space: nowrap;
             }
 
+            .file-actions {
+              display: flex;
+              align-items: center;
+              justify-content: flex-end;
+              gap: 12px;
+            }
+
+            .compact {
+              min-height: 36px;
+              margin-top: 0;
+              padding: 0 13px;
+              font-size: 13px;
+            }
+
             table {
               width: 100%;
               border-collapse: collapse;
+              user-select: none;
             }
 
             th, td {
@@ -1193,8 +1522,59 @@ public static class PageRenderer
               text-transform: uppercase;
             }
 
+            .sort-button {
+              min-height: 0;
+              margin: 0;
+              padding: 0;
+              background: transparent;
+              color: inherit;
+              font-size: inherit;
+              font-weight: inherit;
+              text-transform: inherit;
+            }
+
+            .sort-button.active {
+              color: var(--blue);
+            }
+
+            .select-column {
+              width: 48px;
+              padding-right: 0;
+              text-align: center;
+            }
+
+            .select-column input[type="checkbox"] {
+              width: 16px;
+              height: 16px;
+              margin: 0;
+              padding: 0;
+              vertical-align: middle;
+            }
+
             tbody tr:hover {
               background: #f8fafc;
+            }
+
+            tbody tr[data-file-name] {
+              cursor: default;
+            }
+
+            tbody tr.is-selected {
+              background: #dbeafe;
+              box-shadow: inset 4px 0 0 var(--blue);
+            }
+
+            tbody tr.is-selected:hover {
+              background: #cfe1ff;
+            }
+
+            tbody tr.fresh-upload {
+              background: #ecfdf5;
+              box-shadow: inset 4px 0 0 #10b981;
+            }
+
+            tbody tr.fresh-upload:hover {
+              background: #dffbea;
             }
 
             .file-name {
@@ -1263,6 +1643,10 @@ public static class PageRenderer
 
             .context-menu button:hover {
               background: #eef4ff;
+            }
+
+            .context-menu button[data-action="move-trash"] {
+              color: #991b1b;
             }
 
             .context-icon {
@@ -1437,6 +1821,7 @@ public static class PageRenderer
           <main>
             {{content}}
           </main>
+          <div class="build-badge">{{buildVersion}}</div>
         </body>
         </html>
         """;

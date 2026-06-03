@@ -83,6 +83,60 @@ public sealed class CloudWebServer
             return Html(PageRenderer.RenderForgotPassword());
         }
 
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/files/download")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            string filePath = request.Query.GetValueOrDefault("path", "");
+            byte[]? content = await fileStorage.ReadFileAsync(email, filePath);
+
+            if (content is null)
+            {
+                return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
+            }
+
+            var response = new HttpResponse(200, "OK", content, "application/octet-stream");
+            response.Headers["Content-Disposition"] = $"attachment; filename=\"{EscapeHeaderFileName(Path.GetFileName(filePath))}\"";
+            return response;
+        }
+
+        if (request.Method == "POST" && request.Path == "/files/download-zip")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            byte[]? zip = await fileStorage.CreateZipAsync(email, selectedFiles);
+
+            if (zip is null)
+            {
+                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Select files first."));
+            }
+
+            var response = new HttpResponse(200, "OK", zip, "application/zip");
+            response.Headers["Content-Disposition"] = "attachment; filename=\"skyvault-selection.zip\"";
+            return response;
+        }
+
+        if (request.Method == "POST" && request.Path == "/files/trash")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            int moved = await fileStorage.MoveToTrashAsync(email, selectedFiles);
+            string message = moved == 0 ? "Select files first." : $"Moved {moved} file(s) to trash.";
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+        }
+
         if (request.Method == "POST" && request.Path == "/forgot-password")
         {
             string resetEmail = NormalizeEmail(request.Form.GetValueOrDefault("email", ""));
@@ -419,6 +473,24 @@ public sealed class CloudWebServer
         }
 
         return response;
+    }
+
+    private static string EscapeHeaderFileName(string fileName)
+    {
+        fileName = string.IsNullOrWhiteSpace(fileName) ? "download" : fileName;
+        return fileName
+            .Replace("\\", "_", StringComparison.Ordinal)
+            .Replace("/", "_", StringComparison.Ordinal)
+            .Replace("\"", "'", StringComparison.Ordinal)
+            .Replace("\r", "", StringComparison.Ordinal)
+            .Replace("\n", "", StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyList<string> ParseSelectedFiles(string paths)
+    {
+        return paths
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
     }
 }
 
