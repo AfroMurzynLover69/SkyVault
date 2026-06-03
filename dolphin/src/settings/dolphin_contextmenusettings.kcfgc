@@ -1,6 +1,0 @@
-File=dolphin_contextmenusettings.kcfg
-ClassName=ContextMenuSettings
-Singleton=yes
-Mutators=true
-IncludeFiles=dolphin_export.h
-Visibility=DOLPHIN_EXPORT
