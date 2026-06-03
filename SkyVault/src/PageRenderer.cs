@@ -460,8 +460,11 @@ public static class PageRenderer
           let autoUploadAfterPick = false;
           let dragDepth = 0;
           let selectionAnchor = null;
-          let pointerSelecting = false;
-          let pointerMode = true;
+          let boxSelecting = false;
+          let boxStartX = 0;
+          let boxStartY = 0;
+          let boxBaseSelection = new Set();
+          const selectionBox = document.createElement('div');
           let fileViewMode = localStorage.getItem('skyvaultFileView') || 'list';
           let confirmResolver = null;
           let promptResolver = null;
@@ -471,6 +474,9 @@ public static class PageRenderer
 
           sortRows();
           setFileView(fileViewMode);
+          selectionBox.className = 'selection-box';
+          selectionBox.hidden = true;
+          document.body.appendChild(selectionBox);
           hidePathEditor();
 
           driveToggle.addEventListener('click', () => {
@@ -678,24 +684,12 @@ public static class PageRenderer
           });
 
           rows.forEach((row) => {
-            row.addEventListener('mousedown', (event) => {
+            row.addEventListener('click', (event) => {
               if (event.button !== 0 || event.target.closest('a, input, button')) {
                 return;
               }
 
-              pointerSelecting = true;
-              pointerMode = event.ctrlKey || event.metaKey ? !selectedPaths.has(row.dataset.filePath || '') : true;
               applyRowSelection(row, event);
-            });
-
-            row.addEventListener('mouseenter', (event) => {
-              if (!pointerSelecting) {
-                return;
-              }
-
-              event.preventDefault();
-              setRowSelected(row, pointerMode);
-              updateSelectedFiles();
             });
 
             row.addEventListener('dragstart', (event) => {
@@ -718,7 +712,7 @@ public static class PageRenderer
               clearDropTargets();
             });
 
-            card.addEventListener('mousedown', (event) => {
+            card.addEventListener('click', (event) => {
               if (event.button !== 0 || event.target.closest('a, input, button')) {
                 return;
               }
@@ -727,28 +721,47 @@ public static class PageRenderer
                 return;
               }
 
-              pointerSelecting = true;
-              pointerMode = event.ctrlKey || event.metaKey ? !selectedPaths.has(row.dataset.filePath || '') : true;
               applyRowSelection(row, event);
-            });
-
-            card.addEventListener('mouseenter', (event) => {
-              if (!pointerSelecting) {
-                return;
-              }
-
-              if (!row) {
-                return;
-              }
-
-              event.preventDefault();
-              setRowSelected(row, pointerMode);
-              updateSelectedFiles();
             });
           });
 
+          filesPanel.addEventListener('mousedown', (event) => {
+            if (event.button !== 0 || event.target.closest('tr[data-file-name], .file-card, a, input, button')) {
+              return;
+            }
+
+            event.preventDefault();
+            hideContextMenu();
+            boxSelecting = true;
+            boxStartX = event.clientX;
+            boxStartY = event.clientY;
+            boxBaseSelection = event.ctrlKey || event.metaKey ? new Set(selectedPaths) : new Set();
+
+            if (!event.ctrlKey && !event.metaKey) {
+              clearSelection();
+            }
+
+            updateSelectionBox(event.clientX, event.clientY);
+          });
+
+          document.addEventListener('mousemove', (event) => {
+            if (!boxSelecting) {
+              return;
+            }
+
+            event.preventDefault();
+            updateSelectionBox(event.clientX, event.clientY);
+            applyBoxSelection(getSelectionBoxRect());
+          });
+
           document.addEventListener('mouseup', () => {
-            pointerSelecting = false;
+            if (!boxSelecting) {
+              return;
+            }
+
+            boxSelecting = false;
+            selectionBox.hidden = true;
+            updateSelectedFiles();
           });
 
           rows.forEach((row) => {
@@ -1167,7 +1180,51 @@ public static class PageRenderer
           }
 
           function updateSelectedFiles() {
+            if (selectedPaths.size > 0) {
+              info.textContent = selectedPaths.size + ' item(s) selected.';
+            }
+
             return selectedPaths.size;
+          }
+
+          function updateSelectionBox(currentX, currentY) {
+            const left = Math.min(boxStartX, currentX);
+            const top = Math.min(boxStartY, currentY);
+            const width = Math.abs(currentX - boxStartX);
+            const height = Math.abs(currentY - boxStartY);
+
+            selectionBox.hidden = false;
+            selectionBox.style.left = left + 'px';
+            selectionBox.style.top = top + 'px';
+            selectionBox.style.width = width + 'px';
+            selectionBox.style.height = height + 'px';
+          }
+
+          function getSelectionBoxRect() {
+            return selectionBox.getBoundingClientRect();
+          }
+
+          function applyBoxSelection(selectionRect) {
+            const targets = fileViewMode === 'grid'
+              ? cards.map((card) => ({ row: getRowForCard(card), element: card }))
+              : rows.map((row) => ({ row, element: row }));
+
+            targets.forEach(({ row, element }) => {
+              if (!row || row.hidden || !row.dataset.filePath) {
+                return;
+              }
+
+              const path = row.dataset.filePath || '';
+              const selected = boxBaseSelection.has(path) || rectanglesIntersect(selectionRect, element.getBoundingClientRect());
+              setRowSelected(row, selected);
+            });
+          }
+
+          function rectanglesIntersect(left, right) {
+            return left.left < right.right
+              && left.right > right.left
+              && left.top < right.bottom
+              && left.bottom > right.top;
           }
 
           function getRowForCard(card) {
@@ -1444,6 +1501,12 @@ public static class PageRenderer
             }
 
             const selectedPaths = getSelectedPaths();
+
+            if (!selectedPaths.includes(sourcePath)) {
+              event.preventDefault();
+              return;
+            }
+
             const draggedPaths = selectedPaths.length > 1 && selectedPaths.includes(sourcePath)
               ? selectedPaths
               : [sourcePath];
@@ -2993,26 +3056,20 @@ public static class PageRenderer
               color: var(--blue);
             }
 
-            .select-column {
-              width: 48px;
-              padding-right: 0;
-              text-align: center;
-            }
-
-            .select-column input[type="checkbox"] {
-              width: 16px;
-              height: 16px;
-              margin: 0;
-              padding: 0;
-              vertical-align: middle;
-            }
-
             tbody tr:hover {
               background: #f8fafc;
             }
 
             tbody tr[data-file-name] {
               cursor: default;
+            }
+
+            .selection-box {
+              position: fixed;
+              z-index: 30;
+              border: 1px solid #2563eb;
+              background: rgba(37, 99, 235, 0.14);
+              pointer-events: none;
             }
 
             tbody tr.is-selected {
