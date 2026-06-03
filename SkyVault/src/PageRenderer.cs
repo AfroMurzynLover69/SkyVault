@@ -192,7 +192,8 @@ public static class PageRenderer
                 <span class="file-picker-icon">+</span>
                 <span>New upload</span>
               </label>
-              <input name="file" id="fileInput" type="file" required>
+              <input name="file" id="fileInput" type="file" multiple required>
+              <input name="folder" id="folderInput" type="file" webkitdirectory directory multiple>
               <button type="submit">Upload</button>
               <div class="upload-status">
                 <div class="progress">
@@ -242,7 +243,7 @@ public static class PageRenderer
 
             {{alert}}
 
-            <section class="files-panel">
+            <section class="files-panel" id="filesPanel">
               <div class="section-head">
                 <div>
                   <p class="eyebrow">Workspace</p>
@@ -267,20 +268,57 @@ public static class PageRenderer
             </section>
           </main>
         </section>
+        <div class="context-menu" id="contextMenu" hidden>
+          <button type="button" data-action="upload-file">
+            <span class="context-icon upload-file-icon"></span>
+            <span>Upload file</span>
+          </button>
+          <button type="button" data-action="upload-folder">
+            <span class="context-icon upload-folder-icon"></span>
+            <span>Upload folder</span>
+          </button>
+          <button type="button" data-action="new-file">
+            <span class="context-icon new-file-icon"></span>
+            <span>New empty file</span>
+          </button>
+          <button type="button" data-action="new-folder">
+            <span class="context-icon new-folder-icon"></span>
+            <span>New folder</span>
+          </button>
+        </div>
         <script>
           const form = document.getElementById('uploadForm');
           const input = document.getElementById('fileInput');
+          const folderInput = document.getElementById('folderInput');
           const bar = document.getElementById('progressBar');
           const info = document.getElementById('uploadInfo');
           const search = document.getElementById('fileSearch');
           const rows = Array.from(document.querySelectorAll('#fileRows tr[data-file-name]'));
           const emptyFilter = document.getElementById('emptyFilter');
+          const filesPanel = document.getElementById('filesPanel');
+          const contextMenu = document.getElementById('contextMenu');
+          let autoUploadAfterPick = false;
+          let dragDepth = 0;
 
           input.addEventListener('change', () => {
-            info.textContent = input.files.length ? input.files[0].name : 'No upload running.';
+            info.textContent = describeFiles(input.files);
+
+            if (autoUploadAfterPick && input.files.length) {
+              autoUploadAfterPick = false;
+              uploadFileItems(fileItemsFromList(input.files));
+              return;
+            }
+
+            autoUploadAfterPick = false;
           });
 
-          form.addEventListener('submit', (event) => {
+          folderInput.addEventListener('change', () => {
+            if (folderInput.files.length) {
+              uploadFileItems(fileItemsFromList(folderInput.files));
+            }
+          });
+
+          form.addEventListener('submit', async (event) => {
             event.preventDefault();
 
             if (!input.files.length) {
@@ -288,37 +326,7 @@ public static class PageRenderer
               return;
             }
 
-            const startedAt = Date.now();
-            const data = new FormData(form);
-            const request = new XMLHttpRequest();
-
-            request.upload.addEventListener('progress', (event) => {
-              if (!event.lengthComputable) {
-                info.textContent = 'Uploading...';
-                return;
-              }
-
-              const percent = Math.round((event.loaded / event.total) * 100);
-              const seconds = Math.max((Date.now() - startedAt) / 1000, 0.1);
-              const speed = event.loaded / seconds;
-              bar.style.width = percent + '%';
-              info.textContent = percent + '% - ' + formatBytes(speed) + '/s';
-            });
-
-            request.addEventListener('load', () => {
-              document.open();
-              document.write(request.responseText);
-              document.close();
-            });
-
-            request.addEventListener('error', () => {
-              info.textContent = 'Upload failed.';
-            });
-
-            bar.style.width = '0%';
-            info.textContent = 'Starting upload...';
-            request.open('POST', '/files/upload');
-            request.send(data);
+            await uploadFileItems(fileItemsFromList(input.files));
           });
 
           search.addEventListener('input', () => {
@@ -337,6 +345,289 @@ public static class PageRenderer
             emptyFilter.style.display = rows.length && !visible ? 'block' : 'none';
           });
 
+          document.addEventListener('dragenter', (event) => {
+            if (!hasDraggedFiles(event)) {
+              return;
+            }
+
+            dragDepth += 1;
+            event.preventDefault();
+            filesPanel.classList.add('is-dragging');
+            info.textContent = 'Drop files or folders to upload.';
+          });
+
+          document.addEventListener('dragover', (event) => {
+            if (!hasDraggedFiles(event)) {
+              return;
+            }
+
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+          });
+
+          document.addEventListener('dragleave', (event) => {
+            if (!hasDraggedFiles(event)) {
+              return;
+            }
+
+            dragDepth = Math.max(dragDepth - 1, 0);
+
+            if (dragDepth === 0) {
+              filesPanel.classList.remove('is-dragging');
+            }
+          });
+
+          document.addEventListener('drop', async (event) => {
+            if (!hasDraggedFiles(event)) {
+              return;
+            }
+
+            event.preventDefault();
+            dragDepth = 0;
+            filesPanel.classList.remove('is-dragging');
+            hideContextMenu();
+
+            const droppedFiles = await getDroppedFileItems(event.dataTransfer);
+            await uploadFileItems(droppedFiles);
+          });
+
+          filesPanel.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            showContextMenu(event.clientX, event.clientY);
+          });
+
+          document.addEventListener('click', (event) => {
+            if (!contextMenu.contains(event.target)) {
+              hideContextMenu();
+            }
+          });
+
+          document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+              hideContextMenu();
+            }
+          });
+
+          contextMenu.addEventListener('click', async (event) => {
+            const button = event.target.closest('button[data-action]');
+
+            if (!button) {
+              return;
+            }
+
+            const action = button.dataset.action;
+            hideContextMenu();
+
+            if (action === 'upload-file') {
+              autoUploadAfterPick = true;
+              input.click();
+              return;
+            }
+
+            if (action === 'upload-folder') {
+              folderInput.click();
+              return;
+            }
+
+            if (action === 'new-file') {
+              await createRemoteItem('/files/create', 'fileName', 'File name');
+              return;
+            }
+
+            if (action === 'new-folder') {
+              await createRemoteItem('/folders/create', 'folderName', 'Folder name');
+            }
+          });
+
+          async function uploadFileItems(items) {
+            const uploadItems = items.filter((item) => item.file);
+
+            if (!uploadItems.length) {
+              info.textContent = 'No files to upload.';
+              return;
+            }
+
+            let lastResponse = '';
+
+            try {
+              for (let index = 0; index < uploadItems.length; index += 1) {
+                const item = uploadItems[index];
+                const data = new FormData();
+                data.append('file', item.file, item.path || item.file.name);
+                lastResponse = await uploadOne(data, item, index, uploadItems.length);
+              }
+
+              input.value = '';
+              folderInput.value = '';
+              document.open();
+              document.write(lastResponse);
+              document.close();
+            } catch {
+              info.textContent = 'Upload failed.';
+            }
+          }
+
+          function uploadOne(data, item, index, total) {
+            return new Promise((resolve, reject) => {
+              const startedAt = Date.now();
+              const request = new XMLHttpRequest();
+              const prefix = total > 1 ? (index + 1) + '/' + total + ' - ' : '';
+
+              request.upload.addEventListener('progress', (event) => {
+                if (!event.lengthComputable) {
+                  info.textContent = prefix + 'Uploading ' + item.path + '...';
+                  return;
+                }
+
+                const percent = Math.round((event.loaded / event.total) * 100);
+                const seconds = Math.max((Date.now() - startedAt) / 1000, 0.1);
+                const speed = event.loaded / seconds;
+                bar.style.width = percent + '%';
+                info.textContent = prefix + percent + '% - ' + formatBytes(speed) + '/s';
+              });
+
+              request.addEventListener('load', () => {
+                resolve(request.responseText);
+              });
+
+              request.addEventListener('error', reject);
+              request.open('POST', '/files/upload');
+              bar.style.width = '0%';
+              info.textContent = prefix + 'Starting ' + item.path + '...';
+              request.send(data);
+            });
+          }
+
+          function fileItemsFromList(files) {
+            return Array.from(files).map((file) => ({
+              file,
+              path: file.webkitRelativePath || file.name
+            }));
+          }
+
+          async function getDroppedFileItems(dataTransfer) {
+            const transferItems = Array.from(dataTransfer.items || []);
+            const collected = [];
+
+            if (transferItems.length && transferItems.some((item) => item.webkitGetAsEntry)) {
+              for (const item of transferItems) {
+                if (item.kind !== 'file') {
+                  continue;
+                }
+
+                const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+
+                if (entry) {
+                  await collectEntry(entry, '', collected);
+                }
+              }
+
+              if (collected.length) {
+                return collected;
+              }
+            }
+
+            return fileItemsFromList(dataTransfer.files || []);
+          }
+
+          function collectEntry(entry, prefix, collected) {
+            return new Promise((resolve) => {
+              if (entry.isFile) {
+                entry.file((file) => {
+                  collected.push({ file, path: prefix + file.name });
+                  resolve();
+                }, resolve);
+                return;
+              }
+
+              if (!entry.isDirectory) {
+                resolve();
+                return;
+              }
+
+              const reader = entry.createReader();
+
+              const readBatch = () => {
+                reader.readEntries(async (entries) => {
+                  if (!entries.length) {
+                    resolve();
+                    return;
+                  }
+
+                  for (const child of entries) {
+                    await collectEntry(child, prefix + entry.name + '/', collected);
+                  }
+
+                  readBatch();
+                }, resolve);
+              };
+
+              readBatch();
+            });
+          }
+
+          async function createRemoteItem(endpoint, fieldName, promptText) {
+            const rawName = prompt(promptText);
+
+            if (rawName === null) {
+              return;
+            }
+
+            const name = rawName.trim();
+
+            if (!name) {
+              info.textContent = 'Name is required.';
+              return;
+            }
+
+            const data = new URLSearchParams();
+            data.set(fieldName, name);
+            info.textContent = 'Creating...';
+
+            try {
+              const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: data.toString()
+              });
+              const html = await response.text();
+              document.open();
+              document.write(html);
+              document.close();
+            } catch {
+              info.textContent = 'Could not create item.';
+            }
+          }
+
+          function hasDraggedFiles(event) {
+            return Array.from(event.dataTransfer?.types || []).includes('Files');
+          }
+
+          function describeFiles(files) {
+            if (!files.length) {
+              return 'No upload running.';
+            }
+
+            if (files.length === 1) {
+              return files[0].webkitRelativePath || files[0].name;
+            }
+
+            return files.length + ' files selected.';
+          }
+
+          function showContextMenu(x, y) {
+            contextMenu.hidden = false;
+            const rect = contextMenu.getBoundingClientRect();
+            const left = Math.min(x, window.innerWidth - rect.width - 10);
+            const top = Math.min(y, window.innerHeight - rect.height - 10);
+            contextMenu.style.left = Math.max(10, left) + 'px';
+            contextMenu.style.top = Math.max(10, top) + 'px';
+          }
+
+          function hideContextMenu() {
+            contextMenu.hidden = true;
+          }
+
           function formatBytes(bytes) {
             if (bytes >= 1024 * 1024) {
               return (bytes / 1024 / 1024).toFixed(2) + ' MB';
@@ -354,15 +645,18 @@ public static class PageRenderer
 
     private static string RenderFileRow(FileEntry file)
     {
+        string iconClass = file.IsFolder ? "folder-icon row-folder-icon" : "file-icon";
+        string size = file.IsFolder ? "Folder" : FormatBytes(file.SizeBytes);
+
         return $$"""
-        <tr data-file-name="{{Escape(file.Name.ToLowerInvariant())}}">
+        <tr data-file-name="{{Escape(file.Name.ToLowerInvariant())}}" data-entry-kind="{{(file.IsFolder ? "folder" : "file")}}">
           <td>
             <span class="file-name">
-              <span class="file-icon"></span>
+              <span class="{{iconClass}}"></span>
               <span>{{Escape(file.Name)}}</span>
             </span>
           </td>
-          <td>{{FormatBytes(file.SizeBytes)}}</td>
+          <td>{{size}}</td>
           <td>{{file.ModifiedAt.LocalDateTime:g}}</td>
         </tr>
         """;
@@ -829,12 +1123,33 @@ public static class PageRenderer
             }
 
             .files-panel {
+              position: relative;
               min-width: 0;
               overflow: hidden;
               border: 1px solid var(--line);
               border-radius: 8px;
               background: var(--surface);
               box-shadow: 0 8px 24px rgba(31, 41, 55, 0.06);
+            }
+
+            .files-panel.is-dragging {
+              border-color: var(--blue);
+              box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12), 0 8px 24px rgba(31, 41, 55, 0.06);
+            }
+
+            .files-panel.is-dragging::after {
+              content: "Drop files or folders to upload";
+              position: absolute;
+              inset: 12px;
+              z-index: 4;
+              display: grid;
+              place-items: center;
+              border: 2px dashed #60a5fa;
+              border-radius: 8px;
+              background: rgba(239, 246, 255, 0.92);
+              color: #1d4ed8;
+              font-weight: 800;
+              pointer-events: none;
             }
 
             .section-head {
@@ -909,6 +1224,132 @@ public static class PageRenderer
               border-bottom: 2px solid #94a3b8;
               background: #eef2f7;
               border-radius: 0 3px 0 3px;
+            }
+
+            .row-folder-icon {
+              width: 24px;
+              height: 18px;
+              color: #2563eb;
+              background: #dbeafe;
+            }
+
+            .context-menu {
+              position: fixed;
+              z-index: 20;
+              display: grid;
+              min-width: 190px;
+              padding: 6px;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface);
+              box-shadow: 0 18px 36px rgba(15, 23, 42, 0.18);
+            }
+
+            .context-menu[hidden] {
+              display: none;
+            }
+
+            .context-menu button {
+              justify-content: flex-start;
+              gap: 10px;
+              min-height: 38px;
+              margin: 0;
+              padding: 0 10px;
+              border-radius: 6px;
+              background: transparent;
+              color: var(--text);
+              font-weight: 700;
+            }
+
+            .context-menu button:hover {
+              background: #eef4ff;
+            }
+
+            .context-icon {
+              position: relative;
+              display: inline-block;
+              width: 18px;
+              height: 18px;
+              color: #2563eb;
+            }
+
+            .upload-file-icon,
+            .new-file-icon {
+              border: 2px solid currentColor;
+              border-radius: 4px;
+            }
+
+            .upload-file-icon::after,
+            .new-file-icon::after {
+              content: "";
+              position: absolute;
+              right: -2px;
+              top: -2px;
+              width: 7px;
+              height: 7px;
+              border-left: 2px solid currentColor;
+              border-bottom: 2px solid currentColor;
+              background: white;
+              border-radius: 0 3px 0 3px;
+            }
+
+            .upload-file-icon::before,
+            .upload-folder-icon::after,
+            .new-file-icon::before,
+            .new-folder-icon::after {
+              content: "";
+              position: absolute;
+              left: 6px;
+              top: 4px;
+              width: 2px;
+              height: 10px;
+              background: currentColor;
+            }
+
+            .upload-file-icon::before,
+            .upload-folder-icon::after {
+              transform: rotate(90deg);
+            }
+
+            .upload-folder-icon,
+            .new-folder-icon {
+              width: 20px;
+              height: 15px;
+              margin-top: 2px;
+              border: 2px solid currentColor;
+              border-radius: 3px;
+            }
+
+            .upload-folder-icon::before,
+            .new-folder-icon::before {
+              content: "";
+              position: absolute;
+              left: 1px;
+              top: -6px;
+              width: 8px;
+              height: 5px;
+              border: 2px solid currentColor;
+              border-bottom: 0;
+              border-radius: 3px 3px 0 0;
+            }
+
+            .new-file-icon::before,
+            .new-folder-icon::after {
+              box-shadow: 0 0 0 0 currentColor;
+            }
+
+            .new-file-icon::before {
+              transform: none;
+            }
+
+            .new-file-icon {
+              background:
+                linear-gradient(currentColor, currentColor) center / 10px 2px no-repeat;
+            }
+
+            .new-folder-icon {
+              background:
+                linear-gradient(currentColor, currentColor) center / 10px 2px no-repeat;
             }
 
             .empty-row td,

@@ -253,6 +253,34 @@ public sealed class CloudWebServer
             return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
         }
 
+        if (request.Method == "POST" && request.Path == "/files/create")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            string fileName = request.Form.GetValueOrDefault("fileName", "");
+            FileCreateResult result = await fileStorage.CreateTextFileAsync(email, fileName, "");
+            string message = FileActionMessage(result, "Empty file created.", "Could not create file.");
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+        }
+
+        if (request.Method == "POST" && request.Path == "/folders/create")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            string folderName = request.Form.GetValueOrDefault("folderName", "");
+            FileCreateResult result = await fileStorage.CreateFolderAsync(email, folderName);
+            string message = FileActionMessage(result, "Folder created.", "Could not create folder.");
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message));
+        }
+
         if (request.Method == "POST" && request.Path == "/logout")
         {
             string? sessionId = request.GetCookie("cloud_session");
@@ -349,6 +377,17 @@ public sealed class CloudWebServer
             EmailSendResult.AuthenticationFailed => "SMTP login failed. Check SMTP_USER, SMTP_PASS and enable mail client access in your mailbox settings.",
             EmailSendResult.Failed => "Could not send email. Check SMTP settings.",
             _ => "Could not send email."
+        };
+    }
+
+    private static string FileActionMessage(FileCreateResult result, string createdMessage, string failedMessage)
+    {
+        return result switch
+        {
+            FileCreateResult.Created => createdMessage,
+            FileCreateResult.InvalidFileName => "Name is invalid. Use letters, numbers, spaces, dots, dashes and underscores.",
+            FileCreateResult.QuotaExceeded => "File is too large for your remaining space.",
+            _ => failedMessage
         };
     }
 

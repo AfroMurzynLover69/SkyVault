@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 public sealed class FileStorage
 {
     private static readonly Regex FileNameRegex = new("^[a-zA-Z0-9_. -]{1,80}$", RegexOptions.Compiled);
+    private const int MaxRelativePathLength = 240;
     private readonly string rootPath;
     private readonly UserStore userStore;
 
@@ -24,14 +25,25 @@ public sealed class FileStorage
         string directory = GetUserDirectory(NormalizeEmail(username));
         Directory.CreateDirectory(directory);
 
-        return Directory
-            .EnumerateFiles(directory)
+        var folders = Directory
+            .EnumerateDirectories(directory, "*", SearchOption.AllDirectories)
+            .Select(path =>
+            {
+                var info = new DirectoryInfo(path);
+                return new FileEntry(ToDisplayPath(Path.GetRelativePath(directory, path)), 0, info.LastWriteTimeUtc, true);
+            });
+        var files = Directory
+            .EnumerateFiles(directory, "*", SearchOption.AllDirectories)
             .Select(path =>
             {
                 var info = new FileInfo(path);
-                return new FileEntry(info.Name, info.Length, info.LastWriteTimeUtc);
-            })
-            .OrderBy(entry => entry.Name)
+                return new FileEntry(ToDisplayPath(Path.GetRelativePath(directory, path)), info.Length, info.LastWriteTimeUtc);
+            });
+
+        return folders
+            .Concat(files)
+            .OrderBy(entry => entry.IsFolder ? 0 : 1)
+            .ThenBy(entry => entry.Name)
             .ToList();
     }
 
@@ -43,8 +55,9 @@ public sealed class FileStorage
     public async Task<FileCreateResult> CreateTextFileAsync(string username, string fileName, string content)
     {
         username = NormalizeEmail(username);
+        string relativePath = NormalizeRelativePath(fileName);
 
-        if (!IsValidFileName(fileName))
+        if (!IsValidRelativePath(relativePath))
         {
             return FileCreateResult.InvalidFileName;
         }
@@ -59,7 +72,8 @@ public sealed class FileStorage
         string directory = GetUserDirectory(username);
         Directory.CreateDirectory(directory);
 
-        string path = Path.Combine(directory, fileName);
+        string path = GetSafeUserPath(directory, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? directory);
         long currentUsed = GetUsedBytes(directory);
         long oldSize = File.Exists(path) ? new FileInfo(path).Length : 0;
         long newSize = Encoding.UTF8.GetByteCount(content);
@@ -75,12 +89,34 @@ public sealed class FileStorage
         return FileCreateResult.Created;
     }
 
+    public Task<FileCreateResult> CreateFolderAsync(string username, string folderName)
+    {
+        username = NormalizeEmail(username);
+        string relativePath = NormalizeRelativePath(folderName);
+
+        if (!IsValidRelativePath(relativePath))
+        {
+            return Task.FromResult(FileCreateResult.InvalidFileName);
+        }
+
+        UserAccount? user = userStore.GetUser(username);
+
+        if (user is null)
+        {
+            return Task.FromResult(FileCreateResult.Failed);
+        }
+
+        string directory = GetUserDirectory(username);
+        Directory.CreateDirectory(GetSafeUserPath(directory, relativePath));
+        return Task.FromResult(FileCreateResult.Created);
+    }
+
     public async Task<FileCreateResult> SaveUploadedFileAsync(string username, MultipartFile file)
     {
         username = NormalizeEmail(username);
-        string fileName = Path.GetFileName(file.FileName);
+        string relativePath = NormalizeRelativePath(file.FileName);
 
-        if (!IsValidFileName(fileName))
+        if (!IsValidRelativePath(relativePath))
         {
             return FileCreateResult.InvalidFileName;
         }
@@ -95,7 +131,8 @@ public sealed class FileStorage
         string directory = GetUserDirectory(username);
         Directory.CreateDirectory(directory);
 
-        string path = Path.Combine(directory, fileName);
+        string path = GetSafeUserPath(directory, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? directory);
         long currentUsed = GetUsedBytes(directory);
         long oldSize = File.Exists(path) ? new FileInfo(path).Length : 0;
         long nextUsed = currentUsed - oldSize + file.Content.LongLength;
@@ -120,12 +157,40 @@ public sealed class FileStorage
         return email.Trim().ToLowerInvariant();
     }
 
+    private static string NormalizeRelativePath(string path)
+    {
+        return path.Trim().Replace('\\', '/').Trim('/');
+    }
+
+    private static string ToDisplayPath(string path)
+    {
+        return path.Replace('\\', '/');
+    }
+
+    private static bool IsValidRelativePath(string path)
+    {
+        if (path.Length == 0 || path.Length > MaxRelativePathLength)
+        {
+            return false;
+        }
+
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        return parts.Length > 0 && parts.All(IsValidFileName);
+    }
+
     private static bool IsValidFileName(string fileName)
     {
         return FileNameRegex.IsMatch(fileName)
             && fileName != "."
             && fileName != ".."
             && !fileName.Contains("..", StringComparison.Ordinal);
+    }
+
+    private static string GetSafeUserPath(string directory, string relativePath)
+    {
+        string[] parts = relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return Path.Combine([directory, .. parts]);
     }
 
     private static long GetUsedBytes(string directory)
@@ -135,6 +200,6 @@ public sealed class FileStorage
             return 0;
         }
 
-        return Directory.EnumerateFiles(directory).Sum(path => new FileInfo(path).Length);
+        return Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length);
     }
 }
