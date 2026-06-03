@@ -529,6 +529,23 @@ public sealed class FileStorage
         return MoveFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting, normalizedNewName);
     }
 
+    public Task<(int Copied, int SkippedExisting, int Missing)> CopyFilesAsync(
+        string username,
+        IReadOnlyList<string> fileNames,
+        string destinationDirectory,
+        bool overwriteExisting = false)
+    {
+        username = NormalizeEmail(username);
+        string normalizedDestination = NormalizeRelativePath(destinationDirectory);
+
+        if (normalizedDestination.Length > 0 && !IsValidRelativePath(normalizedDestination))
+        {
+            return Task.FromResult((0, 0, 0));
+        }
+
+        return CopyFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting);
+    }
+
     private IEnumerable<string> GetUserDirectories(string username)
     {
         return rootPaths.Select(rootPath => Path.Combine(rootPath, username));
@@ -673,6 +690,135 @@ public sealed class FileStorage
         }
 
         return (moved, skippedBecauseExists, missingSource);
+    }
+
+    private async Task<(int Copied, int SkippedExisting, int Missing)> CopyFilesInternalAsync(
+        string username,
+        IReadOnlyList<string> fileNames,
+        string destinationDirectory,
+        bool overwriteExisting)
+    {
+        int copied = 0;
+        int skippedBecauseExists = 0;
+        int missingSource = 0;
+
+        foreach (string rawFileName in fileNames)
+        {
+            string relativePath = NormalizeRelativePath(rawFileName);
+
+            if (!IsValidRelativePath(relativePath))
+            {
+                continue;
+            }
+
+            string fileName = Path.GetFileName(relativePath);
+            string destinationRelativePath = string.IsNullOrEmpty(destinationDirectory)
+                ? fileName
+                : $"{destinationDirectory}/{fileName}";
+
+            if (string.Equals(relativePath, destinationRelativePath, StringComparison.Ordinal))
+            {
+                if (!overwriteExisting)
+                {
+                    skippedBecauseExists += 1;
+                }
+
+                continue;
+            }
+
+            if (destinationRelativePath.StartsWith(relativePath + "/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!PathExists(username, relativePath))
+            {
+                missingSource += 1;
+                continue;
+            }
+
+            if (PathExists(username, destinationRelativePath))
+            {
+                if (!overwriteExisting)
+                {
+                    skippedBecauseExists += 1;
+                    continue;
+                }
+
+                DeletePathAcrossReplicas(username, destinationRelativePath);
+            }
+
+            bool copiedAnyReplica = false;
+            DateTime sourceModifiedAt = DateTime.UtcNow;
+            bool sourceModifiedCaptured = false;
+
+            foreach (string directory in GetUserDirectories(username))
+            {
+                string sourcePath = GetSafeUserPath(directory, relativePath);
+                string destinationPath = GetSafeUserPath(directory, destinationRelativePath);
+
+                if (!File.Exists(sourcePath))
+                {
+                    if (!Directory.Exists(sourcePath))
+                    {
+                        continue;
+                    }
+
+                    if (!sourceModifiedCaptured)
+                    {
+                        sourceModifiedAt = Directory.GetLastWriteTimeUtc(sourcePath);
+                        sourceModifiedCaptured = true;
+                    }
+
+                    CopyDirectory(sourcePath, destinationPath);
+                    Directory.SetLastWriteTimeUtc(destinationPath, sourceModifiedAt);
+                    copiedAnyReplica = true;
+                    continue;
+                }
+
+                if (!sourceModifiedCaptured)
+                {
+                    sourceModifiedAt = File.GetLastWriteTimeUtc(sourcePath);
+                    sourceModifiedCaptured = true;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? directory);
+                File.Copy(sourcePath, destinationPath, overwrite: true);
+                File.SetLastWriteTimeUtc(destinationPath, sourceModifiedAt);
+                copiedAnyReplica = true;
+            }
+
+            if (copiedAnyReplica)
+            {
+                copied += 1;
+            }
+        }
+
+        if (copied > 0)
+        {
+            await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
+        }
+
+        return (copied, skippedBecauseExists, missingSource);
+    }
+
+    private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
+    {
+        Directory.CreateDirectory(destinationDirectory);
+
+        foreach (string sourceFile in Directory.EnumerateFiles(sourceDirectory))
+        {
+            string destinationFile = Path.Combine(destinationDirectory, Path.GetFileName(sourceFile));
+            File.Copy(sourceFile, destinationFile, overwrite: true);
+            File.SetLastWriteTimeUtc(destinationFile, File.GetLastWriteTimeUtc(sourceFile));
+        }
+
+        foreach (string sourceChildDirectory in Directory.EnumerateDirectories(sourceDirectory))
+        {
+            string destinationChildDirectory = Path.Combine(destinationDirectory, Path.GetFileName(sourceChildDirectory));
+            CopyDirectory(sourceChildDirectory, destinationChildDirectory);
+            Directory.SetLastWriteTimeUtc(destinationChildDirectory, Directory.GetLastWriteTimeUtc(sourceChildDirectory));
+        }
     }
 
     private static bool TryParseTrashRelativePath(string path, out string sourceRelativePath, out string destinationRelativePath)

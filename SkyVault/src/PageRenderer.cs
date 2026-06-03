@@ -236,7 +236,7 @@ public static class PageRenderer
             : "";
         string contextMenuItems = trashMode
             ? "<button type=\"button\" data-action=\"file-info\"><span class=\"context-icon info-icon\"></span><span>Informacje</span></button><button type=\"button\" data-action=\"restore-trash\"><span class=\"context-icon restore-icon\"></span><span>Restore</span></button><button type=\"button\" data-action=\"delete-forever\"><span class=\"context-icon delete-forever-icon\"></span><span>Delete forever</span></button>"
-            : "<button type=\"button\" data-action=\"file-info\"><span class=\"context-icon info-icon\"></span><span>Informacje</span></button><button type=\"button\" data-action=\"upload-file\"><span class=\"context-icon upload-file-icon\"></span><span>Upload file</span></button><button type=\"button\" data-action=\"upload-folder\"><span class=\"context-icon upload-folder-icon\"></span><span>Upload folder</span></button><button type=\"button\" data-action=\"new-file\"><span class=\"context-icon new-file-icon\"></span><span>New empty file</span></button><button type=\"button\" data-action=\"new-folder\"><span class=\"context-icon new-folder-icon\"></span><span>New folder</span></button><button type=\"button\" data-action=\"download-zip\"><span class=\"context-icon download-zip-icon\"></span><span>Download ZIP</span></button><button type=\"button\" data-action=\"move-selected-here\"><span class=\"context-icon move-here-icon\"></span><span>Move selected here</span></button><button type=\"button\" data-action=\"move-trash\"><span class=\"context-icon trash-icon\"></span><span>Move to trash</span></button>";
+            : "<button type=\"button\" data-action=\"file-info\"><span class=\"context-icon info-icon\"></span><span>Informacje</span></button><button type=\"button\" data-action=\"clipboard-copy\"><span class=\"context-icon copy-icon\"></span><span>Kopiuj</span></button><button type=\"button\" data-action=\"clipboard-cut\"><span class=\"context-icon cut-icon\"></span><span>Wytnij</span></button><button type=\"button\" data-action=\"clipboard-paste\"><span class=\"context-icon paste-icon\"></span><span>Wklej tutaj</span></button><button type=\"button\" data-action=\"upload-file\"><span class=\"context-icon upload-file-icon\"></span><span>Upload file</span></button><button type=\"button\" data-action=\"upload-folder\"><span class=\"context-icon upload-folder-icon\"></span><span>Upload folder</span></button><button type=\"button\" data-action=\"new-file\"><span class=\"context-icon new-file-icon\"></span><span>New empty file</span></button><button type=\"button\" data-action=\"new-folder\"><span class=\"context-icon new-folder-icon\"></span><span>New folder</span></button><button type=\"button\" data-action=\"download-zip\"><span class=\"context-icon download-zip-icon\"></span><span>Download ZIP</span></button><button type=\"button\" data-action=\"move-selected-here\"><span class=\"context-icon move-here-icon\"></span><span>Move selected here</span></button><button type=\"button\" data-action=\"move-trash\"><span class=\"context-icon trash-icon\"></span><span>Move to trash</span></button>";
 
         return $$"""
         <section class="app-shell">
@@ -477,8 +477,12 @@ public static class PageRenderer
           const rowsByPath = new Map(rows.map((row) => [row.dataset.filePath || '', row]));
           const cardsByPath = new Map(cards.map((card) => [card.dataset.filePath || '', card]));
           const contextMenuInfo = contextMenu.querySelector('[data-action="file-info"]');
+          const contextMenuCopy = contextMenu.querySelector('[data-action="clipboard-copy"]');
+          const contextMenuCut = contextMenu.querySelector('[data-action="clipboard-cut"]');
+          const contextMenuPaste = contextMenu.querySelector('[data-action="clipboard-paste"]');
           const contextMenuMoveHere = contextMenu.querySelector('[data-action="move-selected-here"]');
           const moveDragType = 'application/x-skyvault-move-paths';
+          const fileClipboardStorageKey = 'skyvaultFileClipboard';
           let currentSort = 'modified';
           let sortDirection = 'desc';
           let autoUploadAfterPick = false;
@@ -496,6 +500,7 @@ public static class PageRenderer
           let contextMenuTargetKind = '';
           let searchQuery = '';
           const selectedPaths = new Set();
+          let fileClipboard = loadFileClipboard();
 
           sortRows();
           applyFileFilter();
@@ -933,7 +938,35 @@ public static class PageRenderer
             }
           });
 
-          document.addEventListener('keydown', (event) => {
+          document.addEventListener('keydown', async (event) => {
+            if ((event.ctrlKey || event.metaKey) && !event.altKey && !isEditableShortcutTarget(event.target)) {
+              const key = event.key.toLowerCase();
+
+              if (key === 'a') {
+                event.preventDefault();
+                selectAllVisibleFiles();
+                return;
+              }
+
+              if (key === 'c') {
+                event.preventDefault();
+                copySelectedToClipboard('copy');
+                return;
+              }
+
+              if (key === 'x') {
+                event.preventDefault();
+                copySelectedToClipboard('cut');
+                return;
+              }
+
+              if (key === 'v') {
+                event.preventDefault();
+                await pasteFileClipboard(currentPath.value);
+                return;
+              }
+            }
+
             if (event.key === 'Escape') {
               hideContextMenu();
               uiInfo.hidden = true;
@@ -949,6 +982,7 @@ public static class PageRenderer
 
             const action = button.dataset.action;
             const targetPath = contextMenuTargetPath;
+            const targetKind = contextMenuTargetKind;
             hideContextMenu();
 
             if (action === 'upload-file') {
@@ -979,6 +1013,21 @@ public static class PageRenderer
 
             if (action === 'file-info') {
               showFileInfo(targetPath);
+              return;
+            }
+
+            if (action === 'clipboard-copy') {
+              copySelectedToClipboard('copy');
+              return;
+            }
+
+            if (action === 'clipboard-cut') {
+              copySelectedToClipboard('cut');
+              return;
+            }
+
+            if (action === 'clipboard-paste') {
+              await pasteFileClipboard(targetKind === 'folder' && targetPath ? targetPath : currentPath.value);
               return;
             }
 
@@ -1233,6 +1282,15 @@ public static class PageRenderer
             if (contextMenuInfo) {
               contextMenuInfo.hidden = !targetPath;
             }
+            if (contextMenuCopy) {
+              contextMenuCopy.hidden = selectedPaths.size === 0;
+            }
+            if (contextMenuCut) {
+              contextMenuCut.hidden = selectedPaths.size === 0;
+            }
+            if (contextMenuPaste) {
+              contextMenuPaste.hidden = !hasFileClipboard();
+            }
             if (contextMenuMoveHere) {
               contextMenuMoveHere.hidden = targetKind !== 'folder' || !targetPath || selectedPaths.size === 0;
             }
@@ -1252,9 +1310,115 @@ public static class PageRenderer
             if (contextMenuInfo) {
               contextMenuInfo.hidden = true;
             }
+            if (contextMenuCopy) {
+              contextMenuCopy.hidden = true;
+            }
+            if (contextMenuCut) {
+              contextMenuCut.hidden = true;
+            }
+            if (contextMenuPaste) {
+              contextMenuPaste.hidden = true;
+            }
             if (contextMenuMoveHere) {
               contextMenuMoveHere.hidden = true;
             }
+          }
+
+          function isEditableShortcutTarget(target) {
+            const element = target instanceof Element ? target : null;
+
+            if (!element) {
+              return false;
+            }
+
+            return Boolean(element.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]'));
+          }
+
+          function loadFileClipboard() {
+            try {
+              const parsed = JSON.parse(sessionStorage.getItem(fileClipboardStorageKey) || '{}');
+              const mode = parsed.mode === 'cut' ? 'cut' : parsed.mode === 'copy' ? 'copy' : '';
+              const paths = Array.isArray(parsed.paths) ? parsed.paths.filter(Boolean) : [];
+              return mode && paths.length ? { mode, paths } : { mode: '', paths: [] };
+            } catch {
+              return { mode: '', paths: [] };
+            }
+          }
+
+          function saveFileClipboard() {
+            if (!fileClipboard.mode || !fileClipboard.paths.length) {
+              sessionStorage.removeItem(fileClipboardStorageKey);
+              return;
+            }
+
+            sessionStorage.setItem(fileClipboardStorageKey, JSON.stringify(fileClipboard));
+          }
+
+          function clearFileClipboard() {
+            fileClipboard = { mode: '', paths: [] };
+            saveFileClipboard();
+          }
+
+          function hasFileClipboard() {
+            fileClipboard = loadFileClipboard();
+            return Boolean(fileClipboard.mode && fileClipboard.paths.length);
+          }
+
+          function selectAllVisibleFiles() {
+            clearSelection();
+
+            rows
+              .filter((row) => !row.hidden && row.dataset.filePath)
+              .forEach((row) => setRowSelected(row, true));
+
+            if (updateSelectedFiles() === 0) {
+              info.textContent = 'Brak widocznych plików do zaznaczenia.';
+            }
+          }
+
+          function copySelectedToClipboard(mode) {
+            if (trashMode) {
+              info.textContent = 'Schowek jest wyłączony w koszu.';
+              return;
+            }
+
+            const paths = getSelectedPaths();
+
+            if (!paths.length) {
+              info.textContent = 'Najpierw zaznacz pliki.';
+              return;
+            }
+
+            fileClipboard = {
+              mode: mode === 'cut' ? 'cut' : 'copy',
+              paths: [...new Set(paths)]
+            };
+            saveFileClipboard();
+            info.textContent = fileClipboard.mode === 'cut'
+              ? 'Wycięto ' + fileClipboard.paths.length + ' element(y).'
+              : 'Skopiowano ' + fileClipboard.paths.length + ' element(y).';
+          }
+
+          async function pasteFileClipboard(destinationPath) {
+            if (trashMode) {
+              info.textContent = 'Nie można wklejać w koszu.';
+              return;
+            }
+
+            fileClipboard = loadFileClipboard();
+            const paths = [...new Set(fileClipboard.paths.filter(Boolean))];
+
+            if (!fileClipboard.mode || !paths.length) {
+              info.textContent = 'Schowek jest pusty.';
+              return;
+            }
+
+            if (fileClipboard.mode === 'cut') {
+              await moveClipboardFiles(paths, destinationPath || '');
+              return;
+            }
+
+            await copyClipboardFiles(paths, destinationPath || '');
           }
 
           function showFileInfo(path) {
@@ -1741,6 +1905,76 @@ public static class PageRenderer
             return preview;
           }
 
+          async function copyClipboardFiles(paths, destinationPath) {
+            const uniquePaths = [...new Set(paths.filter(Boolean))];
+
+            if (!uniquePaths.length) {
+              info.textContent = 'Najpierw zaznacz pliki.';
+              return;
+            }
+
+            try {
+              const result = await submitCopyRequest(uniquePaths, destinationPath || '');
+
+              if (result.conflict) {
+                if (!await askConfirm('That destination already exists. Replace selected item(s)?')) {
+                  document.open();
+                  document.write(result.html);
+                  document.close();
+                  return;
+                }
+
+                const replaced = await submitCopyRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
+                document.open();
+                document.write(replaced.html);
+                document.close();
+                return;
+              }
+
+              document.open();
+              document.write(result.html);
+              document.close();
+            } catch {
+              info.textContent = 'Nie można skopiować plików.';
+            }
+          }
+
+          async function moveClipboardFiles(paths, destinationPath) {
+            const uniquePaths = [...new Set(paths.filter(Boolean))];
+
+            if (!uniquePaths.length) {
+              info.textContent = 'Najpierw zaznacz pliki.';
+              return;
+            }
+
+            try {
+              const result = await submitMoveRequest(uniquePaths, destinationPath || '');
+
+              if (result.conflict) {
+                if (!await askConfirm('That destination already exists. Replace selected item(s)?')) {
+                  document.open();
+                  document.write(result.html);
+                  document.close();
+                  return;
+                }
+
+                const replaced = await submitMoveRequest(uniquePaths, destinationPath || '', { overwriteExisting: 'true' });
+                clearFileClipboard();
+                document.open();
+                document.write(replaced.html);
+                document.close();
+                return;
+              }
+
+              clearFileClipboard();
+              document.open();
+              document.write(result.html);
+              document.close();
+            } catch {
+              info.textContent = 'Nie można przenieść plików.';
+            }
+          }
+
           async function moveDraggedFiles(paths, destinationPath) {
             const uniquePaths = [...new Set(paths.filter(Boolean))];
 
@@ -1788,6 +2022,30 @@ public static class PageRenderer
             info.textContent = 'Moving...';
 
             const response = await fetch('/files/move', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: data.toString()
+            });
+
+            return {
+              html: await response.text(),
+              conflict: response.headers.get('X-Conflict') === 'true'
+            };
+          }
+
+          async function submitCopyRequest(paths, destinationPath, extraFields = {}) {
+            const data = new URLSearchParams();
+            data.set('paths', paths.join('\n'));
+            data.set('destinationPath', destinationPath);
+            data.set('currentPath', currentPath.value);
+
+            Object.entries(extraFields).forEach(([key, value]) => {
+              data.set(key, value);
+            });
+
+            info.textContent = 'Kopiowanie...';
+
+            const response = await fetch('/files/copy', {
               method: 'POST',
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
               body: data.toString()
@@ -3860,10 +4118,22 @@ public static class PageRenderer
               color: #1d4ed8;
             }
 
+            .copy-icon,
+            .cut-icon,
+            .paste-icon {
+              color: #1d4ed8;
+            }
+
             .move-here-icon::before,
             .move-here-icon::after,
             .info-icon::before,
-            .info-icon::after {
+            .info-icon::after,
+            .copy-icon::before,
+            .copy-icon::after,
+            .cut-icon::before,
+            .cut-icon::after,
+            .paste-icon::before,
+            .paste-icon::after {
               content: "";
               position: absolute;
             }
@@ -3902,6 +4172,63 @@ public static class PageRenderer
               height: 2px;
               background: currentColor;
               box-shadow: -2px -2px 0 0 currentColor, -2px 2px 0 0 currentColor;
+            }
+
+            .copy-icon::before {
+              left: 2px;
+              top: 4px;
+              width: 10px;
+              height: 10px;
+              border: 2px solid currentColor;
+              border-radius: 2px;
+            }
+
+            .copy-icon::after {
+              left: 6px;
+              top: 1px;
+              width: 10px;
+              height: 10px;
+              border: 2px solid currentColor;
+              border-radius: 2px;
+              background: var(--bg);
+            }
+
+            .cut-icon::before {
+              left: 3px;
+              top: 4px;
+              width: 12px;
+              height: 2px;
+              background: currentColor;
+              transform: rotate(35deg);
+            }
+
+            .cut-icon::after {
+              left: 3px;
+              top: 11px;
+              width: 12px;
+              height: 2px;
+              background: currentColor;
+              transform: rotate(-35deg);
+            }
+
+            .paste-icon::before {
+              left: 4px;
+              top: 4px;
+              width: 11px;
+              height: 12px;
+              border: 2px solid currentColor;
+              border-radius: 2px;
+            }
+
+            .paste-icon::after {
+              left: 7px;
+              top: 1px;
+              width: 6px;
+              height: 4px;
+              border: 2px solid currentColor;
+              border-bottom: 0;
+              border-radius: 2px 2px 0 0;
+              background: var(--bg);
             }
 
             .restore-icon {

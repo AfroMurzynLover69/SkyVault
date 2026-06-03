@@ -218,6 +218,48 @@ public sealed class CloudWebServer
             return response;
         }
 
+        if (request.Method == "POST" && request.Path == "/files/copy")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            string destinationDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("destinationPath", ""));
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
+            (int copied, int skippedExisting, int missing) = await fileStorage.CopyFilesAsync(email, selectedFiles, destinationDirectory, overwriteExisting);
+            string message = BuildCopyMessage(copied, skippedExisting, missing);
+
+            if (copied == 0 && skippedExisting > 0)
+            {
+                AppLog.Warn($"Copy blocked by existing destination for {email}: {destinationDirectory}");
+            }
+            else if (copied > 0 && skippedExisting > 0)
+            {
+                AppLog.Warn($"Copy completed with conflicts for {email}: {copied} copied, {skippedExisting} skipped, destination={destinationDirectory}");
+            }
+            else if (copied > 0)
+            {
+                AppLog.Info($"Copy completed for {email}: {copied} item(s) to {destinationDirectory}");
+            }
+
+            if (missing > 0)
+            {
+                AppLog.Warn($"Copy skipped missing items for {email}: {missing} item(s)");
+            }
+
+            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+
+            if (!overwriteExisting && skippedExisting > 0)
+            {
+                response.Headers["X-Conflict"] = "true";
+            }
+
+            return response;
+        }
+
         if (request.Method == "POST" && request.Path == "/files/trash")
         {
             if (email is null)
@@ -844,6 +886,33 @@ public sealed class CloudWebServer
         if (moved > 0)
         {
             parts.Add($"Moved {moved} file(s).");
+        }
+
+        if (skippedExisting > 0)
+        {
+            parts.Add($"{skippedExisting} item(s) were skipped because the target already exists.");
+        }
+
+        if (missing > 0)
+        {
+            parts.Add($"{missing} item(s) were missing.");
+        }
+
+        return parts.Count == 0 ? "Select files first." : string.Join(' ', parts);
+    }
+
+    private static string BuildCopyMessage(int copied, int skippedExisting, int missing)
+    {
+        if (copied == 0 && skippedExisting > 0)
+        {
+            return "That destination already contains a file or folder with the same name.";
+        }
+
+        var parts = new List<string>();
+
+        if (copied > 0)
+        {
+            parts.Add($"Copied {copied} file(s).");
         }
 
         if (skippedExisting > 0)
