@@ -2548,9 +2548,9 @@ public static class PageRenderer
             .workspace {
               display: grid;
               grid-template-rows: auto auto auto 1fr;
-              gap: 14px;
+              gap: 8px;
               min-width: 0;
-              padding: 18px 22px 28px;
+              padding: 14px 18px 18px;
             }
 
             .workspace-top {
@@ -2570,19 +2570,20 @@ public static class PageRenderer
               align-items: center;
               gap: 7px;
               min-width: 0;
-              width: min(100%, 1080px);
-              height: 52px;
+              width: 100%;
+              height: 44px;
               padding: 0 8px;
-              border: 1px solid #b8c0cc;
-              background: #ffffff;
-              border-radius: 8px;
+              border: 0;
+              border-bottom: 1px solid var(--line);
+              background: transparent;
+              border-radius: 0;
               color: #1f2937;
             }
 
             .path-bar.is-drop-target {
               border-color: #60a5fa;
               background: #f8fbff;
-              box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.12);
+              box-shadow: inset 0 -2px 0 #60a5fa;
             }
 
             .path-up {
@@ -2816,16 +2817,16 @@ public static class PageRenderer
             .files-panel {
               position: relative;
               min-width: 0;
-              overflow: hidden;
-              border: 1px solid var(--line);
-              border-radius: 8px;
-              background: var(--surface);
-              box-shadow: 0 8px 24px rgba(31, 41, 55, 0.06);
+              min-height: 0;
+              overflow: auto;
+              border: 0;
+              border-radius: 0;
+              background: transparent;
+              box-shadow: none;
             }
 
             .files-panel.is-dragging {
-              border-color: var(--blue);
-              box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12), 0 8px 24px rgba(31, 41, 55, 0.06);
+              box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.32);
             }
 
             .files-panel.is-dragging::after {
@@ -2836,7 +2837,7 @@ public static class PageRenderer
               display: grid;
               place-items: center;
               border: 2px dashed #60a5fa;
-              border-radius: 8px;
+              border-radius: 6px;
               background: rgba(239, 246, 255, 0.92);
               color: #1d4ed8;
               font-weight: 800;
@@ -2848,7 +2849,7 @@ public static class PageRenderer
               align-items: center;
               justify-content: space-between;
               gap: 18px;
-              padding: 24px 26px 16px;
+              padding: 10px 0 8px;
             }
 
             .section-head .eyebrow {
@@ -3028,7 +3029,7 @@ public static class PageRenderer
             }
 
             th, td {
-              padding: 13px 26px;
+              padding: 10px 8px;
               border-top: 1px solid #edf1f7;
               text-align: left;
               white-space: nowrap;
@@ -3093,8 +3094,8 @@ public static class PageRenderer
             .files-grid {
               display: none;
               grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-              gap: 14px;
-              padding: 0 26px 26px;
+              gap: 10px;
+              padding: 6px 0 18px;
               user-select: none;
             }
 
@@ -3112,21 +3113,21 @@ public static class PageRenderer
               grid-template-rows: 104px minmax(62px, auto);
               min-width: 0;
               overflow: hidden;
-              border: 1px solid #dbe3ef;
-              border-radius: 8px;
-              background: #ffffff;
-              box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+              border: 1px solid transparent;
+              border-radius: 6px;
+              background: transparent;
+              box-shadow: none;
             }
 
             .file-card:hover {
-              border-color: #b8c7dc;
+              border-color: #dbe3ef;
               background: #f8fafc;
             }
 
             .file-card.is-selected {
               border-color: #93c5fd;
               background: #dbeafe;
-              box-shadow: inset 4px 0 0 var(--blue), 0 1px 2px rgba(15, 23, 42, 0.05);
+              box-shadow: inset 4px 0 0 var(--blue);
             }
 
             .file-card-preview {
@@ -3134,8 +3135,8 @@ public static class PageRenderer
               display: grid;
               place-items: center;
               min-width: 0;
-              border-bottom: 1px solid #edf1f7;
-              background: linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
+              border-bottom: 1px solid transparent;
+              background: transparent;
             }
 
             .file-card.is-selected .file-card-preview {
