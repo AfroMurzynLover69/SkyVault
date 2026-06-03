@@ -2037,18 +2037,18 @@ public static class PageRenderer
           <title>SkyVault</title>
           <style>
             :root {
-              --bg: #f7f9fc;
-              --surface: #ffffff;
-              --surface-soft: #eef4ff;
-              --line: #dfe5ef;
-              --line-strong: #c8d2e1;
-              --text: #1f2937;
-              --muted: #64748b;
-              --blue: #2563eb;
-              --blue-soft: #dbeafe;
-              --green: #10b981;
-              --amber: #f59e0b;
-              --shadow: 0 18px 38px rgba(31, 41, 55, 0.10);
+              --bg: #080b0a;
+              --surface: #101512;
+              --surface-soft: #17221b;
+              --line: #25342b;
+              --line-strong: #3c5d49;
+              --text: #e4eee8;
+              --muted: #8fa398;
+              --blue: #4b9f68;
+              --blue-soft: #16271d;
+              --green: #4b9f68;
+              --amber: #fbbf24;
+              --shadow: 0 18px 38px rgba(0, 0, 0, 0.34);
             }
 
             * { box-sizing: border-box; }
@@ -3610,6 +3610,208 @@ public static class PageRenderer
             .empty-row td,
             .empty-row td {
               padding: 72px 24px;
+            }
+
+            .build-badge {
+              border-color: var(--line-strong);
+              background: rgba(13, 21, 17, 0.88);
+              color: var(--muted);
+            }
+
+            .auth-card,
+            .largest-files,
+            .preview-panel,
+            .ui-confirm-panel,
+            .context-menu {
+              border-color: var(--line);
+              background: var(--surface);
+              color: var(--text);
+              box-shadow: var(--shadow);
+            }
+
+            input {
+              border-color: var(--line-strong);
+              background: #0a0f0c;
+              color: var(--text);
+            }
+
+            input:focus {
+              outline: 2px solid var(--blue-soft);
+              border-color: var(--green);
+            }
+
+            button,
+            .button {
+              background: var(--green);
+              color: #07100b;
+            }
+
+            .secondary,
+            .ui-confirm-actions button:not(.primary) {
+              background: var(--surface-soft);
+              color: var(--text);
+            }
+
+            .sidebar {
+              background: #0a0f0c;
+              border-right-color: var(--line);
+            }
+
+            .nav-item {
+              color: #b8c9bf;
+            }
+
+            .nav-item.active,
+            .nav-item:hover {
+              background: var(--surface-soft);
+              color: #ffffff;
+            }
+
+            .file-picker,
+            .largest-title {
+              border-color: var(--line);
+              background: var(--surface);
+              color: var(--text);
+            }
+
+            .meter,
+            .progress {
+              background: #18261e;
+            }
+
+            .progress span,
+            .meter span {
+              background: linear-gradient(90deg, #367a50, #6ab883);
+            }
+
+            .account-email,
+            .section-head span,
+            p,
+            th {
+              color: var(--muted);
+            }
+
+            .avatar {
+              background: #367a50;
+              color: #ffffff;
+            }
+
+            .path-bar {
+              color: var(--text);
+            }
+
+            .path-folder-icon,
+            .path-crumb,
+            .path-editor input,
+            .file-card-link,
+            .file-card-meta,
+            td,
+            label {
+              color: var(--text);
+            }
+
+            .path-separator,
+            .places-heading,
+            .largest-empty {
+              color: var(--muted);
+            }
+
+            .path-crumb:hover,
+            .sort-button.active,
+            a {
+              color: #8fcca4;
+            }
+
+            .path-crumb.is-current {
+              color: #ffffff;
+            }
+
+            .path-crumb.is-drop-target,
+            .view-button.active,
+            .context-menu button:hover {
+              background: var(--surface-soft);
+              color: #8fcca4;
+            }
+
+            .view-button {
+              color: var(--muted);
+            }
+
+            .view-button:hover,
+            .path-up:hover,
+            .path-editor-button:hover {
+              background: var(--surface-soft);
+              color: var(--text);
+            }
+
+            th,
+            td,
+            .largest-title,
+            .largest-file,
+            .file-card-preview {
+              border-color: var(--line);
+            }
+
+            tbody tr:hover,
+            .file-card:hover {
+              background: rgba(75, 159, 104, 0.08);
+            }
+
+            tbody tr.is-selected,
+            .file-card.is-selected,
+            .file-card.is-selected .file-card-preview {
+              border-color: #4b9f68;
+              background: rgba(75, 159, 104, 0.18);
+              box-shadow: inset 4px 0 0 var(--green);
+            }
+
+            tbody tr.is-selected:hover {
+              background: rgba(75, 159, 104, 0.24);
+            }
+
+            tbody tr.fresh-upload,
+            tbody tr.fresh-upload:hover {
+              background: rgba(75, 159, 104, 0.12);
+              box-shadow: inset 4px 0 0 var(--green);
+            }
+
+            .selection-box {
+              border-color: #6ab883;
+              background: rgba(75, 159, 104, 0.16);
+            }
+
+            .alert,
+            .alert.success {
+              background: rgba(75, 159, 104, 0.12);
+              border-color: #367a50;
+              color: #c7e6d1;
+            }
+
+            .files-panel.is-dragging {
+              box-shadow: inset 0 0 0 2px rgba(75, 159, 104, 0.42);
+            }
+
+            .files-panel.is-dragging::after {
+              border-color: #6ab883;
+              background: rgba(6, 10, 8, 0.88);
+              color: #c7e6d1;
+            }
+
+            .context-icon,
+            .move-here-icon,
+            .restore-icon {
+              color: #6ab883;
+            }
+
+            .context-menu button[data-action="move-selected-here"],
+            .context-menu button[data-action="restore-trash"] {
+              color: #8fcca4;
+            }
+
+            .context-menu button[data-action="move-trash"],
+            .context-menu button[data-action="delete-forever"],
+            .delete-forever-icon {
+              color: #f87171;
             }
 
             @media (max-width: 900px) {
