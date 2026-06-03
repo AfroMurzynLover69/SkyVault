@@ -66,6 +66,11 @@ public sealed class CloudWebServer
     {
         string? email = GetLoggedInEmail(request);
 
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/assets/logo.png")
+        {
+            return StaticFile(Path.Combine("SkyVault", "assets", "logo.png"), "image/png");
+        }
+
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/")
         {
             string mode = request.Query.GetValueOrDefault("mode", "login");
@@ -246,6 +251,18 @@ public sealed class CloudWebServer
     private static HttpResponse Html(string body, int statusCode = 200, string reason = "OK")
     {
         return new HttpResponse(statusCode, reason, body);
+    }
+
+    private static HttpResponse StaticFile(string path, string contentType)
+    {
+        if (!File.Exists(path))
+        {
+            return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
+        }
+
+        var response = new HttpResponse(200, "OK", File.ReadAllBytes(path), contentType);
+        response.Headers["Cache-Control"] = "public, max-age=86400";
+        return response;
     }
 
     private static HttpResponse Redirect(string location, string? sessionId = null)

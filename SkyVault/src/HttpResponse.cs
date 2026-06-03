@@ -4,22 +4,30 @@ public sealed class HttpResponse
 {
     private readonly int statusCode;
     private readonly string reason;
-    private readonly string body;
+    private readonly byte[] bodyBytes;
+    private readonly string contentType;
 
     public HttpResponse(int statusCode, string reason, string body)
     {
         this.statusCode = statusCode;
         this.reason = reason;
-        this.body = body;
+        bodyBytes = Encoding.UTF8.GetBytes(body);
+        contentType = "text/html; charset=utf-8";
+    }
+
+    public HttpResponse(int statusCode, string reason, byte[] bodyBytes, string contentType)
+    {
+        this.statusCode = statusCode;
+        this.reason = reason;
+        this.bodyBytes = bodyBytes;
+        this.contentType = contentType;
     }
 
     public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public async Task WriteAsync(Stream stream)
     {
-        byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
-
-        Headers["Content-Type"] = "text/html; charset=utf-8";
+        Headers["Content-Type"] = contentType;
         Headers["Content-Length"] = bodyBytes.Length.ToString();
         Headers["Connection"] = "close";
 

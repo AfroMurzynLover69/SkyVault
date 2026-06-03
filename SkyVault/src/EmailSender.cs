@@ -6,6 +6,8 @@ using System.Text;
 
 public sealed class EmailSender
 {
+    private const string LogoContentId = "skyvault-logo";
+    private static readonly string LogoPath = Path.Combine("SkyVault", "assets", "logo.png");
     private readonly string host;
     private readonly int port;
     private readonly string username;
@@ -108,6 +110,10 @@ public sealed class EmailSender
     {
         string safeRecipient = WebUtility.HtmlEncode(recipient);
         string safeCode = WebUtility.HtmlEncode(code);
+        string boundary = "skyvault-" + Guid.NewGuid().ToString("N");
+        string logoHtml = File.Exists(LogoPath)
+            ? $"""<img src="cid:{LogoContentId}" alt="SkyVault" style="display:block;width:180px;max-width:100%;height:auto;border:0;">"""
+            : """<div style="font-size:20px;font-weight:700;color:#111827;">SkyVault</div>""";
         string html = $$"""
         <!doctype html>
         <html>
@@ -118,12 +124,7 @@ public sealed class EmailSender
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
                   <tr>
                     <td style="padding:28px 30px 18px;">
-                      <table role="presentation" cellspacing="0" cellpadding="0">
-                        <tr>
-                          <td style="width:34px;height:34px;border-radius:8px;background:#2563eb;color:#ffffff;font-size:20px;font-weight:700;text-align:center;vertical-align:middle;">S</td>
-                          <td style="padding-left:12px;font-size:20px;font-weight:700;color:#111827;">SkyVault</td>
-                        </tr>
-                      </table>
+                      {{logoHtml}}
                     </td>
                   </tr>
                   <tr>
@@ -157,10 +158,42 @@ public sealed class EmailSender
             $"To: {recipient}",
             "Subject: SkyVault verification code",
             "MIME-Version: 1.0",
+            $"Content-Type: multipart/related; boundary=\"{boundary}\"",
+            "",
+            $"--{boundary}",
             "Content-Type: text/html; charset=utf-8",
             "Content-Transfer-Encoding: 8bit",
             "",
-            html
+            html,
+            BuildLogoPart(boundary),
+            $"--{boundary}--"
+        ]);
+    }
+
+    private static string BuildLogoPart(string boundary)
+    {
+        if (!File.Exists(LogoPath))
+        {
+            return "";
+        }
+
+        string base64 = Convert.ToBase64String(File.ReadAllBytes(LogoPath));
+        string encodedLines = string.Join("\r\n", Enumerable.Range(0, (base64.Length + 75) / 76)
+            .Select(index =>
+            {
+                int start = index * 76;
+                int length = Math.Min(76, base64.Length - start);
+                return base64.Substring(start, length);
+            }));
+
+        return string.Join("\r\n", [
+            $"--{boundary}",
+            "Content-Type: image/png; name=\"logo.png\"",
+            "Content-Transfer-Encoding: base64",
+            $"Content-ID: <{LogoContentId}>",
+            "Content-Disposition: inline; filename=\"logo.png\"",
+            "",
+            encodedLines
         ]);
     }
 

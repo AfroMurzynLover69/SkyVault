@@ -23,8 +23,7 @@ public static class PageRenderer
         <section class="auth-page">
           <div class="auth-brand">
             <div class="brand-lockup">
-              <span class="logo-mark"></span>
-              <span>SkyVault</span>
+              <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
             </div>
             <h1>Not found</h1>
             <p>The page you requested does not exist.</p>
@@ -57,8 +56,7 @@ public static class PageRenderer
         <section class="auth-page">
           <div class="auth-brand">
             <div class="brand-lockup">
-              <span class="logo-mark"></span>
-              <span>SkyVault</span>
+              <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
             </div>
             <h1>Your private file space.</h1>
             <p>Email verification, local storage, and a focused browser workspace.</p>
@@ -86,8 +84,7 @@ public static class PageRenderer
         <section class="auth-page">
           <div class="auth-brand">
             <div class="brand-lockup">
-              <span class="logo-mark"></span>
-              <span>SkyVault</span>
+              <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
             </div>
             <h1>Check your inbox.</h1>
             <p>Enter the verification code sent to {{Escape(email)}}.</p>
@@ -121,8 +118,7 @@ public static class PageRenderer
         <section class="app-shell">
           <aside class="sidebar">
             <div class="brand-lockup">
-              <span class="logo-mark"></span>
-              <span>SkyVault</span>
+              <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
             </div>
 
             <form class="upload-panel" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
@@ -380,23 +376,13 @@ public static class PageRenderer
             .brand-lockup {
               display: inline-flex;
               align-items: center;
-              gap: 11px;
-              font-size: 20px;
-              font-weight: 700;
             }
 
-            .logo-mark {
-              position: relative;
-              display: inline-block;
-              width: 34px;
-              height: 34px;
-              flex: 0 0 auto;
-              border-radius: 8px;
-              background:
-                linear-gradient(135deg, var(--green) 0 46%, transparent 47%),
-                linear-gradient(225deg, #60a5fa 0 46%, transparent 47%),
-                linear-gradient(315deg, var(--blue) 0 46%, transparent 47%);
-              box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45);
+            .brand-logo {
+              display: block;
+              width: 174px;
+              height: auto;
+              object-fit: contain;
             }
 
             .auth-page {
@@ -515,6 +501,10 @@ public static class PageRenderer
               padding: 22px 16px;
               border-right: 1px solid var(--line);
               background: #f4f7fb;
+            }
+
+            .sidebar .brand-logo {
+              width: 168px;
             }
 
             .upload-panel {
