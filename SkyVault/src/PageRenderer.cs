@@ -357,7 +357,7 @@ public static class PageRenderer
               </div>
             </div>
 
-            {{alert}}
+            <div class="alert-slot">{{alert}}</div>
 
             <section class="files-panel" id="filesPanel" data-view="{{currentView}}">
               <div class="section-head">
@@ -2547,9 +2547,10 @@ public static class PageRenderer
 
             .workspace {
               display: grid;
-              grid-template-rows: auto auto auto 1fr;
+              grid-template-rows: auto auto auto minmax(0, 1fr);
               gap: 8px;
               min-width: 0;
+              height: 100vh;
               padding: 14px 18px 18px;
             }
 
@@ -2562,6 +2563,14 @@ public static class PageRenderer
 
             .location-row {
               min-width: 0;
+            }
+
+            .alert-slot {
+              min-height: 0;
+            }
+
+            .alert-slot:empty {
+              display: none;
             }
 
             .path-bar {
@@ -2818,6 +2827,7 @@ public static class PageRenderer
               position: relative;
               min-width: 0;
               min-height: 0;
+              height: 100%;
               overflow: auto;
               border: 0;
               border-radius: 0;
