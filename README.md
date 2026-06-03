@@ -13,16 +13,19 @@ SkyVault is a simple private cloud file server written in C#/.NET.
 Create a local `.env` file in the project root:
 
 ```sh
-SMTP_HOST='smtp.example.com'
-SMTP_PORT='465'
-SMTP_USER='your-email@example.com'
-SMTP_PASS='your-password-or-app-password'
-SMTP_FROM='your-email@example.com'
+SMTP_HOST='smtp.gmail.com'
+SMTP_PORT='587'
+SMTP_USER='skyvaultcloud0@gmail.com'
+SMTP_PASS='your-gmail-app-password'
+SMTP_FROM='skyvaultcloud0@gmail.com'
 SMTP_SSL='true'
 PORT='18080'
 ```
 
 The `.env` file is ignored by Git, because it contains secrets.
+
+You can copy `.env.example` to `.env` and replace only `SMTP_PASS`.
+For Gmail, `SMTP_PASS` must be an app password, not the normal account password.
 
 ## Run
 
