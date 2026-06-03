@@ -13,6 +13,7 @@ public sealed class CloudWebServer
     private readonly EmailSender emailSender;
     private readonly ConcurrentDictionary<string, string> sessions = new();
     private readonly ConcurrentDictionary<string, PendingRegistration> pendingRegistrations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, PendingPasswordReset> pendingPasswordResets = new(StringComparer.Ordinal);
 
     public CloudWebServer(IPAddress address, int port, UserStore userStore, FileStorage fileStorage, EmailSender emailSender)
     {
@@ -75,6 +76,77 @@ public sealed class CloudWebServer
         {
             string mode = request.Query.GetValueOrDefault("mode", "login");
             return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), mode));
+        }
+
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/forgot-password")
+        {
+            return Html(PageRenderer.RenderForgotPassword());
+        }
+
+        if (request.Method == "POST" && request.Path == "/forgot-password")
+        {
+            string resetEmail = NormalizeEmail(request.Form.GetValueOrDefault("email", ""));
+            UserAccount? account = userStore.GetUser(resetEmail);
+
+            if (account is not null)
+            {
+                string token = GenerateResetToken();
+                pendingPasswordResets[token] = new PendingPasswordReset(
+                    resetEmail,
+                    token,
+                    DateTimeOffset.UtcNow.AddMinutes(30));
+
+                string resetUrl = BuildResetUrl(request, token);
+                EmailSendResult sendResult = await emailSender.SendPasswordResetAsync(resetEmail, resetUrl);
+
+                if (sendResult != EmailSendResult.Sent)
+                {
+                    pendingPasswordResets.TryRemove(token, out _);
+                    return Html(PageRenderer.RenderForgotPassword(EmailMessage(sendResult)));
+                }
+            }
+
+            return Html(PageRenderer.RenderForgotPassword("If that email exists, a reset link has been sent."));
+        }
+
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/reset")
+        {
+            string token = request.Query.GetValueOrDefault("token", "");
+
+            if (!IsValidResetToken(token))
+            {
+                return Html(PageRenderer.RenderForgotPassword("Reset link is invalid or expired."));
+            }
+
+            return Html(PageRenderer.RenderResetPassword(token));
+        }
+
+        if (request.Method == "POST" && request.Path == "/reset-password")
+        {
+            string token = request.Form.GetValueOrDefault("token", "");
+            string newPassword = request.Form.GetValueOrDefault("password", "");
+            string confirmPassword = request.Form.GetValueOrDefault("confirmPassword", "");
+
+            if (!IsValidResetToken(token))
+            {
+                return Html(PageRenderer.RenderForgotPassword("Reset link is invalid or expired."));
+            }
+
+            if (!string.Equals(newPassword, confirmPassword, StringComparison.Ordinal))
+            {
+                return Html(PageRenderer.RenderResetPassword(token, "Passwords do not match."));
+            }
+
+            PendingPasswordReset pending = pendingPasswordResets[token];
+            RegisterResult result = await userStore.SetPasswordAsync(pending.Email, newPassword);
+
+            if (result != RegisterResult.Created)
+            {
+                return Html(PageRenderer.RenderResetPassword(token, RegistrationMessage(result)));
+            }
+
+            pendingPasswordResets.TryRemove(token, out _);
+            return Html(PageRenderer.RenderHome(null, null, [], "login", "Password changed. You can sign in now."));
         }
 
         if (request.Method == "POST" && request.Path == "/register")
@@ -226,6 +298,38 @@ public sealed class CloudWebServer
         return RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
     }
 
+    private static string GenerateResetToken()
+    {
+        return WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+    }
+
+    private bool IsValidResetToken(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)
+            || !pendingPasswordResets.TryGetValue(token, out PendingPasswordReset? pending))
+        {
+            return false;
+        }
+
+        if (pending.ExpiresAt >= DateTimeOffset.UtcNow)
+        {
+            return true;
+        }
+
+        pendingPasswordResets.TryRemove(token, out _);
+        return false;
+    }
+
+    private static string BuildResetUrl(HttpRequest request, string token)
+    {
+        string host = request.Headers.GetValueOrDefault("Host", "127.0.0.1:8080");
+        string scheme = request.Headers.TryGetValue("X-Forwarded-Proto", out string? forwardedProto)
+            ? forwardedProto
+            : "http";
+
+        return $"{scheme}://{host}/reset?token={WebUtility.UrlEncode(token)}";
+    }
+
     private static string RegistrationMessage(RegisterResult result)
     {
         return result switch
@@ -243,8 +347,8 @@ public sealed class CloudWebServer
         {
             EmailSendResult.NotConfigured => "Email sending is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM.",
             EmailSendResult.AuthenticationFailed => "SMTP login failed. Check SMTP_USER, SMTP_PASS and enable mail client access in your mailbox settings.",
-            EmailSendResult.Failed => "Could not send verification email. Check SMTP settings.",
-            _ => "Could not send verification email."
+            EmailSendResult.Failed => "Could not send email. Check SMTP settings.",
+            _ => "Could not send email."
         };
     }
 
@@ -276,5 +380,16 @@ public sealed class CloudWebServer
         }
 
         return response;
+    }
+}
+
+public static class WebEncoders
+{
+    public static string Base64UrlEncode(byte[] bytes)
+    {
+        return Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
     }
 }

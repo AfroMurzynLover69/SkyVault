@@ -104,6 +104,29 @@ public sealed class UserStore
         }
     }
 
+    public async Task<RegisterResult> SetPasswordAsync(string email, string password)
+    {
+        string normalizedEmail = NormalizeEmail(email);
+
+        if (password.Length < 4)
+        {
+            return RegisterResult.InvalidPassword;
+        }
+
+        lock (gate)
+        {
+            if (!users.TryGetValue(normalizedEmail, out UserAccount? user))
+            {
+                return RegisterResult.InvalidEmail;
+            }
+
+            user.Password = password;
+        }
+
+        await SaveAsync();
+        return RegisterResult.Created;
+    }
+
     public UserAccount? GetUser(string email)
     {
         string normalizedEmail = NormalizeEmail(email);

@@ -44,6 +44,59 @@ public sealed class EmailSender
 
     public async Task<EmailSendResult> SendVerificationCodeAsync(string recipient, string code)
     {
+        return await SendMessageAsync(
+            recipient,
+            "SkyVault verification code",
+            BuildVerificationMessage);
+
+        string BuildVerificationMessage()
+        {
+            string safeRecipient = WebUtility.HtmlEncode(recipient);
+            string safeCode = WebUtility.HtmlEncode(code);
+
+            return BuildHtmlShell(
+                "Verify your email",
+                $"Use this code to finish creating the SkyVault account for {safeRecipient}.",
+                $"""
+                <div style="background:#eef4ff;border:1px solid #bfdbfe;border-radius:8px;padding:22px;text-align:center;">
+                  <div style="font-size:34px;line-height:1;font-weight:700;color:#1d4ed8;">{safeCode}</div>
+                </div>
+                """,
+                "This code expires in 10 minutes. If you did not request it, you can ignore this email.");
+        }
+    }
+
+    public async Task<EmailSendResult> SendPasswordResetAsync(string recipient, string resetUrl)
+    {
+        return await SendMessageAsync(
+            recipient,
+            "Reset your SkyVault password",
+            BuildResetMessage);
+
+        string BuildResetMessage()
+        {
+            string safeRecipient = WebUtility.HtmlEncode(recipient);
+            string safeResetUrl = WebUtility.HtmlEncode(resetUrl);
+
+            return BuildHtmlShell(
+                "Reset your password",
+                $"We received a password reset request for {safeRecipient}.",
+                $"""
+                <table role="presentation" cellspacing="0" cellpadding="0">
+                  <tr>
+                    <td style="background:#2563eb;border-radius:8px;">
+                      <a href="{safeResetUrl}" style="display:inline-block;padding:14px 20px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Set a new password</a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:18px 0 0;color:#64748b;font-size:13px;line-height:1.6;">If the button does not work, open this link:<br><a href="{safeResetUrl}" style="color:#2563eb;">{safeResetUrl}</a></p>
+                """,
+                "This reset link expires in 30 minutes. If you did not request it, you can ignore this email.");
+        }
+    }
+
+    private async Task<EmailSendResult> SendMessageAsync(string recipient, string subject, Func<string> buildHtml)
+    {
         if (!IsConfigured)
         {
             return EmailSendResult.NotConfigured;
@@ -81,7 +134,7 @@ public sealed class EmailSender
             await SendCommandAsync(stream, $"MAIL FROM:<{from}>", 250);
             await SendCommandAsync(stream, $"RCPT TO:<{recipient}>", 250, 251);
             await SendCommandAsync(stream, "DATA", 354);
-            await WriteLineAsync(stream, BuildMessage(recipient, code));
+            await WriteLineAsync(stream, BuildMessage(recipient, subject, buildHtml()));
             await SendCommandAsync(stream, ".", 250);
             await SendCommandAsync(stream, "QUIT", 221);
 
@@ -106,15 +159,34 @@ public sealed class EmailSender
         return tlsStream;
     }
 
-    private string BuildMessage(string recipient, string code)
+    private string BuildMessage(string recipient, string subject, string html)
     {
-        string safeRecipient = WebUtility.HtmlEncode(recipient);
-        string safeCode = WebUtility.HtmlEncode(code);
         string boundary = "skyvault-" + Guid.NewGuid().ToString("N");
+
+        return string.Join("\r\n", [
+            $"From: SkyVault <{from}>",
+            $"To: {recipient}",
+            $"Subject: {subject}",
+            "MIME-Version: 1.0",
+            $"Content-Type: multipart/related; boundary=\"{boundary}\"",
+            "",
+            $"--{boundary}",
+            "Content-Type: text/html; charset=utf-8",
+            "Content-Transfer-Encoding: 8bit",
+            "",
+            html,
+            BuildLogoPart(boundary),
+            $"--{boundary}--"
+        ]);
+    }
+
+    private static string BuildHtmlShell(string title, string intro, string actionHtml, string footer)
+    {
         string logoHtml = File.Exists(LogoPath)
             ? $"""<img src="cid:{LogoContentId}" alt="SkyVault" style="display:block;width:180px;max-width:100%;height:auto;border:0;">"""
             : """<div style="font-size:20px;font-weight:700;color:#111827;">SkyVault</div>""";
-        string html = $$"""
+
+        return $$"""
         <!doctype html>
         <html>
         <body style="margin:0;padding:0;background:#f6f8fb;font-family:Arial,sans-serif;color:#1f2937;">
@@ -129,20 +201,18 @@ public sealed class EmailSender
                   </tr>
                   <tr>
                     <td style="padding:0 30px 8px;">
-                      <h1 style="margin:0 0 10px;font-size:28px;line-height:1.2;color:#111827;">Verify your email</h1>
-                      <p style="margin:0;color:#64748b;font-size:15px;line-height:1.6;">Use this code to finish creating the SkyVault account for {{safeRecipient}}.</p>
+                      <h1 style="margin:0 0 10px;font-size:28px;line-height:1.2;color:#111827;">{{title}}</h1>
+                      <p style="margin:0;color:#64748b;font-size:15px;line-height:1.6;">{{intro}}</p>
                     </td>
                   </tr>
                   <tr>
                     <td style="padding:22px 30px;">
-                      <div style="background:#eef4ff;border:1px solid #bfdbfe;border-radius:8px;padding:22px;text-align:center;">
-                        <div style="font-size:34px;line-height:1;font-weight:700;color:#1d4ed8;">{{safeCode}}</div>
-                      </div>
+                      {{actionHtml}}
                     </td>
                   </tr>
                   <tr>
                     <td style="padding:0 30px 30px;">
-                      <p style="margin:0;color:#64748b;font-size:14px;line-height:1.6;">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
+                      <p style="margin:0;color:#64748b;font-size:14px;line-height:1.6;">{{footer}}</p>
                     </td>
                   </tr>
                 </table>
@@ -152,22 +222,6 @@ public sealed class EmailSender
         </body>
         </html>
         """;
-
-        return string.Join("\r\n", [
-            $"From: SkyVault <{from}>",
-            $"To: {recipient}",
-            "Subject: SkyVault verification code",
-            "MIME-Version: 1.0",
-            $"Content-Type: multipart/related; boundary=\"{boundary}\"",
-            "",
-            $"--{boundary}",
-            "Content-Type: text/html; charset=utf-8",
-            "Content-Transfer-Encoding: 8bit",
-            "",
-            html,
-            BuildLogoPart(boundary),
-            $"--{boundary}--"
-        ]);
     }
 
     private static string BuildLogoPart(string boundary)

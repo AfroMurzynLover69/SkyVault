@@ -40,6 +40,16 @@ public static class PageRenderer
         return Layout(RenderVerificationPanel(email, message));
     }
 
+    public static string RenderForgotPassword(string? message = null)
+    {
+        return Layout(RenderForgotPasswordPanel(message));
+    }
+
+    public static string RenderResetPassword(string token, string? message = null)
+    {
+        return Layout(RenderResetPasswordPanel(token, message));
+    }
+
     private static string RenderAuthPanel(string mode, string? message)
     {
         bool registerMode = mode.Equals("register", StringComparison.OrdinalIgnoreCase);
@@ -70,7 +80,63 @@ public static class PageRenderer
             <label for="password">Password</label>
             <input id="password" name="password" type="password" autocomplete="{{passwordAuto}}" required minlength="4">
             <button type="submit">{{button}}</button>
+            <p class="switch"><a href="/forgot-password">Forgot password?</a></p>
             <p class="switch">{{switchText}} <a href="{{switchLink}}">{{switchLabel}}</a></p>
+          </form>
+        </section>
+        """;
+    }
+
+    private static string RenderForgotPasswordPanel(string? message)
+    {
+        string alert = RenderAlert(message);
+
+        return $$"""
+        <section class="auth-page">
+          <div class="auth-brand">
+            <div class="brand-lockup">
+              <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
+            </div>
+            <h1>Reset your password.</h1>
+            <p>Enter your account email and SkyVault will send a reset link.</p>
+          </div>
+
+          <form class="auth-card" method="post" action="/forgot-password">
+            <h2>Password reset</h2>
+            {{alert}}
+            <label for="email">Email</label>
+            <input id="email" name="email" type="email" autocomplete="email" required maxlength="254">
+            <button type="submit">Send reset link</button>
+            <p class="switch"><a href="/">Back to sign in</a></p>
+          </form>
+        </section>
+        """;
+    }
+
+    private static string RenderResetPasswordPanel(string token, string? message)
+    {
+        string alert = RenderAlert(message);
+
+        return $$"""
+        <section class="auth-page">
+          <div class="auth-brand">
+            <div class="brand-lockup">
+              <img class="brand-logo" src="/assets/logo.png" alt="SkyVault">
+            </div>
+            <h1>Choose a new password.</h1>
+            <p>Set a new password for your SkyVault account.</p>
+          </div>
+
+          <form class="auth-card" method="post" action="/reset-password">
+            <h2>New password</h2>
+            {{alert}}
+            <input name="token" type="hidden" value="{{Escape(token)}}">
+            <label for="password">New password</label>
+            <input id="password" name="password" type="password" autocomplete="new-password" required minlength="4">
+            <label for="confirmPassword">Confirm password</label>
+            <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" required minlength="4">
+            <button type="submit">Save password</button>
+            <p class="switch"><a href="/">Back to sign in</a></p>
           </form>
         </section>
         """;
