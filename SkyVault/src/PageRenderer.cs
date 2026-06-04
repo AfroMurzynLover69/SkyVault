@@ -255,15 +255,6 @@ public static class PageRenderer
     {
         currentDirectory = NormalizeCloudPath(currentDirectory);
         currentView = NormalizeView(currentView);
-      if (currentView == "trash" && currentDirectory.Length == 0)
-      {
-        currentDirectory = ".trash";
-      }
-
-      if (string.Equals(currentDirectory, ".trash", StringComparison.OrdinalIgnoreCase))
-      {
-        currentView = "trash";
-      }
         bool trashMode = currentView == "trash";
         IReadOnlyList<FileEntry> visibleFiles = GetVisibleFiles(files, trashFiles, currentDirectory, currentView, starredPaths);
         double usedPercent = account.QuotaBytes == 0 ? 0 : account.UsedBytes * 100.0 / account.QuotaBytes;
@@ -283,7 +274,7 @@ public static class PageRenderer
         string parentHref = currentDirectory.Length == 0 ? "/" : $"/?path={WebUtility.UrlEncode(parentDirectory)}";
         string pathBreadcrumbs = RenderPathBreadcrumbs(currentDirectory);
         string trashActions = trashMode
-            ? "<button class=\"trash-empty-button\" type=\"button\" id=\"emptyTrash\"><span class=\"context-icon delete-forever-icon\"></span><span>Empty trash</span></button>"
+            ? "<button class=\"trash-empty-button\" type=\"button\" id=\"emptyTrash\"><img class=\"trash-empty-icon\" src=\"/assets/icons/user-trash.svg\" alt=\"\"><span>Empty trash</span></button>"
             : "";
         string fileBrowserContent = computersMode
             ? RenderDeviceSessions(deviceSessions)
@@ -2954,25 +2945,6 @@ public static class PageRenderer
             .ToList();
     }
 
-        private static IReadOnlyList<FileEntry> AddTrashFolderIfNeeded(
-          IReadOnlyList<FileEntry> entries,
-          IReadOnlyList<FileEntry> trashFiles,
-          string currentDirectory)
-        {
-          if (currentDirectory.Length != 0)
-          {
-            return entries;
-          }
-
-          DateTimeOffset modifiedAt = trashFiles.Count > 0
-            ? trashFiles.Max(entry => entry.ModifiedAt)
-            : DateTimeOffset.UtcNow;
-
-          var list = entries.ToList();
-          list.Insert(0, new FileEntry(".trash", 0, modifiedAt, true));
-          return list;
-        }
-
     private static IReadOnlyList<FileEntry> GetVisibleFiles(IReadOnlyList<FileEntry> files, IReadOnlyList<FileEntry> trashFiles, string currentDirectory, string currentView, IReadOnlySet<string> starredPaths)
     {
         currentView = NormalizeView(currentView);
@@ -3003,7 +2975,7 @@ public static class PageRenderer
                 .OrderByDescending(file => file.ModifiedAt)
                 .ThenBy(file => file.Name)
                 .ToList(),
-            _ => AddTrashFolderIfNeeded(GetDirectoryEntries(files, currentDirectory), trashFiles, currentDirectory)
+            _ => GetDirectoryEntries(files, currentDirectory)
         };
     }
 
@@ -4196,19 +4168,21 @@ public static class PageRenderer
               display: inline-flex;
               align-items: center;
               gap: 8px;
-              min-height: 34px;
+              min-height: 32px;
               margin: 0;
-              padding: 0 12px;
-              border: 1px solid #fecaca;
-              border-radius: 8px;
-              background: #dc2626;
-              color: #ffffff;
+              padding: 0 11px;
+              border: 1px solid #3f474d;
+              border-radius: 6px;
+              background: #2b2c2c;
+              color: #d7dadd;
               box-shadow: none;
-              font-weight: 800;
+              font-size: 13px;
+              font-weight: 600;
             }
 
             .trash-empty-button:hover {
-              background: #b91c1c;
+              background: #303940;
+              color: #ffffff;
             }
 
             .trash-empty-button .context-icon {
@@ -5468,6 +5442,14 @@ public static class PageRenderer
               color: #f87171;
             }
 
+            .trash-empty-icon {
+              display: block;
+              width: 16px;
+              height: 16px;
+              opacity: 0.88;
+              filter: brightness(0) invert(1);
+            }
+
             .home-icon,
             .home-icon::after {
               background: #4b9f68;
@@ -5525,13 +5507,14 @@ public static class PageRenderer
             }
 
             .trash-empty-button {
-              border-color: #5d2525;
-              background: #7f1d1d;
-              color: #fee2e2;
+              border-color: #3f474d;
+              background: #2b2c2c;
+              color: #d7dadd;
             }
 
             .trash-empty-button:hover {
-              background: #991b1b;
+              background: #303940;
+              color: #ffffff;
             }
 
             .app-shell {
