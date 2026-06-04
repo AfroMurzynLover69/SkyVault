@@ -1,49 +1,117 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 public sealed class CloudWebServer
 {
+    private const long MaxPreviewBytes = 20L * 1024 * 1024;
+    private const long MaxZipBytes = 512L * 1024 * 1024;
     private readonly IPAddress address;
     private readonly int port;
     private readonly UserStore userStore;
     private readonly FileStorage fileStorage;
     private readonly EmailSender emailSender;
+    private readonly ServerOptions options;
+    private readonly RequestScheduler scheduler;
+    private readonly SemaphoreSlim connectionSlots;
+    private readonly ConcurrentDictionary<long, Task> activeClientTasks = new();
+    private readonly PeriodicTimer metricsTimer = new(TimeSpan.FromSeconds(30));
     private readonly ConcurrentDictionary<string, string> sessions = new();
     private readonly ConcurrentDictionary<string, DeviceSessionInfo> deviceSessions = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> starredFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, UploadSession> uploadSessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PendingRegistration> pendingRegistrations = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PendingPasswordReset> pendingPasswordResets = new(StringComparer.Ordinal);
+    private long nextClientTaskId;
 
-    public CloudWebServer(IPAddress address, int port, UserStore userStore, FileStorage fileStorage, EmailSender emailSender)
+    public CloudWebServer(IPAddress address, int port, UserStore userStore, FileStorage fileStorage, EmailSender emailSender, ServerOptions? options = null)
     {
         this.address = address;
         this.port = port;
         this.userStore = userStore;
         this.fileStorage = fileStorage;
         this.emailSender = emailSender;
+        this.options = options ?? new ServerOptions();
+        scheduler = new RequestScheduler(this.options);
+        connectionSlots = new SemaphoreSlim(this.options.MaxConnections, this.options.MaxConnections);
     }
 
-    public async Task StartAsync()
+    public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         TcpListener listener = new TcpListener(address, port);
         listener.Start();
+        _ = LogMetricsAsync(cancellationToken);
 
-        while (true)
+        try
         {
-            TcpClient client = await listener.AcceptTcpClientAsync();
-            _ = Task.Run(() => HandleClientAsync(client));
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                TcpClient? client = null;
+
+                try
+                {
+                    client = await listener.AcceptTcpClientAsync(cancellationToken);
+
+                    if (!await connectionSlots.WaitAsync(TimeSpan.FromSeconds(options.UiQueueTimeoutSeconds), cancellationToken))
+                    {
+                        scheduler.MarkRejected();
+                        AppLog.Warn($"Connection rejected: max active connections reached ({options.MaxConnections}).");
+                        await WriteBusyAndCloseAsync(client, 503, "Server Busy", "Server is busy. Try again later.", cancellationToken);
+                        continue;
+                    }
+
+                    long taskId = Interlocked.Increment(ref nextClientTaskId);
+                    Task task = HandleClientAsync(client, cancellationToken);
+                    activeClientTasks[taskId] = task;
+                    _ = task.ContinueWith(_ =>
+                    {
+                        activeClientTasks.TryRemove(taskId, out Task? _);
+                        connectionSlots.Release();
+                    }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or InvalidOperationException)
+                {
+                    AppLog.Warn($"Accept loop recovered from error: {ex.Message}");
+                    client?.Close();
+                }
+                catch (OutOfMemoryException ex)
+                {
+                    AppLog.Error("Critical memory pressure in accept loop.", ex);
+                    client?.Close();
+                }
+            }
+        }
+        finally
+        {
+            listener.Stop();
+
+            Task[] remaining = activeClientTasks.Values.ToArray();
+
+            if (remaining.Length > 0)
+            {
+                AppLog.Info($"Waiting for {remaining.Length} active client(s) to finish.");
+                await Task.WhenAny(Task.WhenAll(remaining), Task.Delay(TimeSpan.FromSeconds(options.GracefulShutdownSeconds), CancellationToken.None));
+            }
         }
     }
 
-    private async Task HandleClientAsync(TcpClient client)
+    private async Task HandleClientAsync(TcpClient client, CancellationToken serverCancellationToken)
     {
         try
         {
+            client.ReceiveTimeout = options.ClientIdleTimeoutSeconds * 1000;
+            client.SendTimeout = options.ClientIdleTimeoutSeconds * 1000;
             await using NetworkStream stream = client.GetStream();
-            HttpRequest? request = await HttpRequest.ReadAsync(stream);
+            HttpRequest? request = await HttpRequest.ReadAsync(stream, options, serverCancellationToken);
 
             if (request is null)
             {
@@ -51,8 +119,7 @@ public sealed class CloudWebServer
             }
 
             string remoteAddress = GetRemoteAddress(client);
-            HttpResponse response = await HandleRequestAsync(request, remoteAddress);
-            await response.WriteAsync(stream);
+            await DispatchRequestAsync(request, remoteAddress, stream, serverCancellationToken);
         }
         catch (IOException)
         {
@@ -61,6 +128,22 @@ public sealed class CloudWebServer
         catch (SocketException)
         {
             AppLog.Warn("Socket error while handling client.");
+        }
+        catch (OperationCanceledException)
+        {
+            AppLog.Warn("Client request timed out or server is shutting down.");
+        }
+        catch (TimeoutException ex)
+        {
+            AppLog.Warn($"Client request timed out: {ex.Message}");
+        }
+        catch (InvalidDataException ex)
+        {
+            AppLog.Warn($"Client sent invalid request data: {ex.Message}");
+        }
+        catch (OutOfMemoryException ex)
+        {
+            AppLog.Error("Critical memory pressure while handling client.", ex);
         }
         catch (Exception ex)
         {
@@ -72,7 +155,128 @@ public sealed class CloudWebServer
         }
     }
 
-    private async Task<HttpResponse> HandleRequestAsync(HttpRequest request, string remoteAddress)
+    private async Task DispatchRequestAsync(HttpRequest request, string remoteAddress, Stream stream, CancellationToken cancellationToken)
+    {
+        string? email = GetLoggedInEmail(request);
+        RequestWorkload workload = ClassifyWorkload(request);
+        await using RequestScheduler.RequestLease? lease = await scheduler.TryAcquireAsync(workload, email, cancellationToken);
+
+        if (lease is null)
+        {
+            scheduler.MarkRejected();
+            AppLog.Warn($"Request rejected by scheduler: workload={workload}, user={email ?? "anonymous"}, path={request.Path}");
+            await Html("<h1>Server busy</h1><p>Too many requests are active. Try again later.</p>", 503, "Server Busy").WriteAsync(stream, cancellationToken);
+            return;
+        }
+
+        try
+        {
+            using CancellationTokenSource workloadTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            if (workload == RequestWorkload.Upload)
+            {
+                workloadTimeout.CancelAfter(TimeSpan.FromSeconds(options.UploadTimeoutSeconds));
+            }
+            else if (workload == RequestWorkload.Download)
+            {
+                workloadTimeout.CancelAfter(TimeSpan.FromSeconds(options.DownloadTimeoutSeconds));
+            }
+
+            HttpResponse response = await HandleRequestAsync(request, remoteAddress, workloadTimeout.Token);
+            await response.WriteAsync(stream, workloadTimeout.Token);
+        }
+        catch (UploadQuotaExceededException)
+        {
+            AppLog.Warn($"Request failed: upload quota exceeded for {email ?? "anonymous"}");
+            await Html("<h1>Quota exceeded</h1><p>File is too large for your remaining space.</p>", 429, "Too Many Requests").WriteAsync(stream, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            AppLog.Warn($"Request cancelled or timed out: workload={workload}, user={email ?? "anonymous"}, path={request.Path}");
+            await Html("<h1>Request timeout</h1><p>The request timed out.</p>", 503, "Request Timeout").WriteAsync(stream, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or InvalidDataException or TimeoutException)
+        {
+            AppLog.Warn($"Request failed without stopping server: {ex.GetType().Name}: {ex.Message}");
+            await Html("<h1>Request failed</h1><p>The request could not be processed.</p>", 400, "Bad Request").WriteAsync(stream, cancellationToken);
+        }
+        catch (OutOfMemoryException ex)
+        {
+            AppLog.Error("Critical memory pressure while dispatching request.", ex);
+            await Html("<h1>Server error</h1><p>The server is under memory pressure.</p>", 503, "Server Error").WriteAsync(stream, CancellationToken.None);
+        }
+    }
+
+    private RequestWorkload ClassifyWorkload(HttpRequest request)
+    {
+        if ((request.Method == "POST" && request.Path == "/files/upload")
+            || (request.Method == "POST" && request.Path == "/api/uploads/start")
+            || (request.Method == "PUT" && IsUploadChunkPath(request.Path)))
+        {
+            return RequestWorkload.Upload;
+        }
+
+        if ((request.Method == "GET" || request.Method == "HEAD")
+            && (request.Path == "/files/raw" || request.Path == "/files/download"))
+        {
+            return RequestWorkload.Download;
+        }
+
+        if (request.Method == "POST"
+            && (request.Path == "/files/download-zip"
+                || request.Path == "/files/move"
+                || request.Path == "/files/copy"
+                || request.Path == "/files/trash"
+                || request.Path == "/files/trash/restore"
+                || request.Path == "/files/trash/delete"
+                || request.Path == "/files/trash/empty"
+                || request.Path == "/files/create"
+                || request.Path == "/folders/create"
+                || IsUploadCompletePath(request.Path)
+                || IsUploadCancelPath(request.Path)))
+        {
+            return RequestWorkload.FileOperation;
+        }
+
+        return RequestWorkload.Ui;
+    }
+
+    private async Task WriteBusyAndCloseAsync(TcpClient client, int statusCode, string reason, string message, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using NetworkStream stream = client.GetStream();
+            await Html($"<h1>{WebUtility.HtmlEncode(reason)}</h1><p>{WebUtility.HtmlEncode(message)}</p>", statusCode, reason).WriteAsync(stream, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
+        {
+            AppLog.Warn($"Could not write busy response: {ex.Message}");
+        }
+        finally
+        {
+            client.Close();
+        }
+    }
+
+    private async Task LogMetricsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (await metricsTimer.WaitForNextTickAsync(cancellationToken))
+            {
+                ThreadPool.GetAvailableThreads(out int workerAvailable, out int completionAvailable);
+                ThreadPool.GetMaxThreads(out int workerMax, out int completionMax);
+                int activeConnections = options.MaxConnections - connectionSlots.CurrentCount;
+                AppLog.Info(
+                    $"Server metrics: connections={activeConnections}, requests={scheduler.ActiveRequests}, uploads={scheduler.ActiveUploads}, downloads={scheduler.ActiveDownloads}, rejected={scheduler.RejectedByLimit}, queueTimeouts={scheduler.QueueTimeouts}, threadPoolWorkers={workerAvailable}/{workerMax}, ioThreads={completionAvailable}/{completionMax}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task<HttpResponse> HandleRequestAsync(HttpRequest request, string remoteAddress, CancellationToken cancellationToken)
     {
         string? sessionId = request.GetCookie("cloud_session");
         string? email = GetLoggedInEmail(request);
@@ -113,6 +317,31 @@ public sealed class CloudWebServer
             return Html(PageRenderer.RenderStorage(account, fileStorage.GetFiles(email)));
         }
 
+        if (request.Method == "POST" && request.Path == "/api/uploads/start")
+        {
+            return await HandleChunkUploadStartAsync(request, email, cancellationToken);
+        }
+
+        if (request.Method == "PUT" && TryParseUploadChunkPath(request.Path, out string chunkUploadId, out int chunkIndex))
+        {
+            return await HandleChunkUploadChunkAsync(request, email, chunkUploadId, chunkIndex, cancellationToken);
+        }
+
+        if ((request.Method == "GET" || request.Method == "HEAD") && TryParseUploadStatusPath(request.Path, out string statusUploadId))
+        {
+            return HandleChunkUploadStatus(email, statusUploadId);
+        }
+
+        if (request.Method == "POST" && TryParseUploadCompletePath(request.Path, out string completeUploadId))
+        {
+            return await HandleChunkUploadCompleteAsync(email, sessionId, completeUploadId, cancellationToken);
+        }
+
+        if (request.Method == "POST" && TryParseUploadCancelPath(request.Path, out string cancelUploadId))
+        {
+            return HandleChunkUploadCancel(email, cancelUploadId);
+        }
+
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/forgot-password")
         {
             return Html(PageRenderer.RenderForgotPassword());
@@ -126,6 +355,21 @@ public sealed class CloudWebServer
             }
 
             string filePath = request.Query.GetValueOrDefault("path", "");
+            FileDownload? previewDownload = await fileStorage.OpenReadStreamAsync(email, filePath);
+
+            if (previewDownload is null)
+            {
+                return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
+            }
+
+            await using (previewDownload.Stream)
+            {
+                if (previewDownload.Length > MaxPreviewBytes)
+                {
+                    return Html(PageRenderer.RenderLargeFilePreview(filePath, previewDownload.Length));
+                }
+            }
+
             byte[]? content = await fileStorage.ReadFileAsync(email, filePath);
 
             if (content is null)
@@ -144,16 +388,14 @@ public sealed class CloudWebServer
             }
 
             string filePath = request.Query.GetValueOrDefault("path", "");
-            byte[]? content = await fileStorage.ReadFileAsync(email, filePath);
+            FileDownload? download = await fileStorage.OpenReadStreamAsync(email, filePath);
 
-            if (content is null)
+            if (download is null)
             {
                 return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
             }
 
-            var response = new HttpResponse(200, "OK", content, GetContentType(filePath));
-            response.Headers["Content-Disposition"] = $"inline; filename=\"{EscapeHeaderFileName(Path.GetFileName(filePath))}\"";
-            return response;
+            return BuildDownloadResponse(request, download, GetContentType(filePath), inline: true);
         }
 
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/files/download")
@@ -164,16 +406,14 @@ public sealed class CloudWebServer
             }
 
             string filePath = request.Query.GetValueOrDefault("path", "");
-            byte[]? content = await fileStorage.ReadFileAsync(email, filePath);
+            FileDownload? download = await fileStorage.OpenReadStreamAsync(email, filePath);
 
-            if (content is null)
+            if (download is null)
             {
                 return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
             }
 
-            var response = new HttpResponse(200, "OK", content, "application/octet-stream");
-            response.Headers["Content-Disposition"] = $"attachment; filename=\"{EscapeHeaderFileName(Path.GetFileName(filePath))}\"";
-            return response;
+            return BuildDownloadResponse(request, download, "application/octet-stream", inline: false);
         }
 
         if (request.Method == "POST" && request.Path == "/files/download-zip")
@@ -184,6 +424,13 @@ public sealed class CloudWebServer
             }
 
             IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            long selectedBytes = fileStorage.GetTotalSizeBytes(email, selectedFiles);
+
+            if (selectedBytes > MaxZipBytes)
+            {
+                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", $"ZIP is limited to {FormatBytes(MaxZipBytes)}. Select fewer files."));
+            }
+
             byte[]? zip = await fileStorage.CreateZipAsync(email, selectedFiles);
 
             if (zip is null)
@@ -571,19 +818,48 @@ public sealed class CloudWebServer
                 return Redirect("/");
             }
 
-            string currentDirectory = NormalizeCloudPath(
-                request.GetMultipartField("currentPath")
-                ?? request.Form.GetValueOrDefault("currentPath", ""));
-            string uploadSource = request.GetMultipartField("uploadSource") ?? "unknown";
-            int clientItemCount = ParseMultipartInt(request, "clientItemCount", -1);
-            int clientFileCount = ParseMultipartInt(request, "clientFileCount", -1);
-            int clientCollectedCount = ParseMultipartInt(request, "clientCollectedCount", -1);
-            IReadOnlyList<MultipartFile> files = request.GetUploadedFiles("file");
-            AppLog.Info($"Upload request in '{currentDirectory}' from {uploadSource} contains {files.Count} file part(s); client items={clientItemCount}, files={clientFileCount}, collected={clientCollectedCount}: {string.Join(", ", files.Select(file => file.FileName))}");
+            string uploadTempRoot = Path.Combine(Path.GetTempPath(), "SkyVault", "uploads", Guid.NewGuid().ToString("N"));
+            MultipartReadResult multipart;
+
+            try
+            {
+                AppLog.Info($"Upload request started for {email}; content-length={request.ContentLength}");
+                multipart = await request.ReadMultipartToTempFilesAsync(uploadTempRoot, fileStorage.GetRemainingQuotaBytes(email), cancellationToken);
+            }
+            catch (UploadQuotaExceededException)
+            {
+                AppLog.Warn($"Upload stopped for {email}: quota exceeded while streaming request body.");
+                DeleteDirectoryQuietly(uploadTempRoot);
+                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "File is too large for your remaining space."));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or IOException or InvalidOperationException)
+            {
+                AppLog.Warn($"Upload failed while reading multipart body for {email}: {ex.Message}");
+                DeleteDirectoryQuietly(uploadTempRoot);
+                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Upload failed."));
+            }
+
+            string rawCurrentDirectory = multipart.Fields.GetValueOrDefault("currentPath", "");
+
+            if (!IsSafeCloudPath(rawCurrentDirectory, allowEmpty: true))
+            {
+                AppLog.Warn($"Upload rejected for {email}: invalid currentPath");
+                DeleteDirectoryQuietly(uploadTempRoot);
+                return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Upload path is invalid."));
+            }
+
+            string currentDirectory = NormalizeCloudPath(rawCurrentDirectory);
+            string uploadSource = multipart.Fields.GetValueOrDefault("uploadSource", "unknown");
+            int clientItemCount = ParseMultipartInt(multipart.Fields, "clientItemCount", -1);
+            int clientFileCount = ParseMultipartInt(multipart.Fields, "clientFileCount", -1);
+            int clientCollectedCount = ParseMultipartInt(multipart.Fields, "clientCollectedCount", -1);
+            IReadOnlyList<UploadedTempFile> files = multipart.Files.Where(file => string.Equals(file.FieldName, "file", StringComparison.OrdinalIgnoreCase)).ToList();
+            AppLog.Info($"Upload request in '{currentDirectory}' from {uploadSource} contains {files.Count} file part(s); client items={clientItemCount}, files={clientFileCount}, collected={clientCollectedCount}: {string.Join(", ", files.Select(file => $"{file.FileName} ({file.Length} bytes)"))}");
 
             if (files.Count == 0)
             {
                 AppLog.Warn($"Upload attempted without a file in {currentDirectory}");
+                DeleteDirectoryQuietly(uploadTempRoot);
                 return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", "Choose a file first.", currentDirectory));
             }
 
@@ -592,15 +868,19 @@ public sealed class CloudWebServer
             int quotaExceeded = 0;
             int failed = 0;
 
-            foreach (MultipartFile file in files)
+            foreach (UploadedTempFile file in files)
             {
-                string uploadPath = CombineCloudPath(currentDirectory, file.FileName);
-                FileCreateResult result = await fileStorage.SaveUploadedFileAsync(email, file with { FileName = uploadPath });
+                string uploadPath = string.IsNullOrEmpty(currentDirectory)
+                    ? file.FileName
+                    : $"{currentDirectory}/{file.FileName}";
+                AppLog.Info($"Saving uploaded file for {email}: {uploadPath}, size={file.Length} bytes");
+                (FileCreateResult result, string savedPath) = await fileStorage.SaveUploadedTempFileAsync(email, uploadPath, file.TempPath, file.Length);
 
                 switch (result)
                 {
                     case FileCreateResult.Created:
                         uploaded += 1;
+                        AppLog.Info($"Upload saved for {email}: {savedPath}, size={file.Length} bytes");
                         break;
                     case FileCreateResult.InvalidFileName:
                         invalid += 1;
@@ -615,7 +895,11 @@ public sealed class CloudWebServer
                         AppLog.Warn($"Upload failed for {uploadPath}: unknown error");
                         break;
                 }
+
+                DeleteFileQuietly(file.TempPath);
             }
+
+            DeleteDirectoryQuietly(uploadTempRoot);
 
             string message = BuildUploadSummary(
                 uploaded,
@@ -689,6 +973,565 @@ public sealed class CloudWebServer
         }
 
         return Html(PageRenderer.RenderNotFound(), 404, "Not Found");
+    }
+
+    private async Task<HttpResponse> HandleChunkUploadStartAsync(HttpRequest request, string? email, CancellationToken cancellationToken)
+    {
+        if (email is null)
+        {
+            return Json(new { error = "not_authenticated" }, 401, "Unauthorized");
+        }
+
+        CleanupExpiredUploadSessions();
+
+        string requestedUploadId = request.Form.GetValueOrDefault("uploadId", "");
+        if (TryGetOwnedUploadSession(email, requestedUploadId, out UploadSession? existingById))
+        {
+            if (existingById is null)
+            {
+                throw new InvalidOperationException("Upload session lookup returned null.");
+            }
+
+            existingById.LastActivityAt = DateTimeOffset.UtcNow;
+            return UploadSessionJson(existingById);
+        }
+
+        string fileName = request.Form.GetValueOrDefault("filename", "").Trim();
+        string relativePath = request.Form.GetValueOrDefault("relativePath", "").Trim();
+        string currentDirectory = request.Form.GetValueOrDefault("currentPath", "").Trim();
+        string lastModified = request.Form.GetValueOrDefault("lastModified", "").Trim();
+
+        if (!long.TryParse(request.Form.GetValueOrDefault("fileSize", ""), out long fileSize)
+            || fileSize <= 0
+            || !int.TryParse(request.Form.GetValueOrDefault("chunkSize", ""), out int chunkSize)
+            || chunkSize <= 0
+            || chunkSize > options.MaxChunkUploadBytes)
+        {
+            return Json(new { error = "invalid_size" }, 400, "Bad Request");
+        }
+
+        if (!IsSafeUploadClientPath(fileName, allowEmpty: false)
+            || !IsSafeCloudPath(currentDirectory, allowEmpty: true)
+            || (!string.IsNullOrWhiteSpace(relativePath) && !IsSafeUploadClientPath(relativePath, allowEmpty: false)))
+        {
+            return Json(new { error = "invalid_path" }, 400, "Bad Request");
+        }
+
+        if (fileName.Length > 255 || relativePath.Length > 1024)
+        {
+            return Json(new { error = "name_too_long" }, 400, "Bad Request");
+        }
+
+        string uploadRelativePath = string.IsNullOrWhiteSpace(relativePath) ? fileName : relativePath;
+        string requestedPath = CombineCloudPath(NormalizeCloudPath(currentDirectory), uploadRelativePath);
+
+        if (!IsSafeUploadClientPath(requestedPath, allowEmpty: false))
+        {
+            return Json(new { error = "invalid_path" }, 400, "Bad Request");
+        }
+
+        if (fileSize > fileStorage.GetRemainingQuotaBytes(email))
+        {
+            return Json(new { error = "quota_exceeded" }, 429, "Too Many Requests");
+        }
+
+        UploadSession? existing = uploadSessions.Values.FirstOrDefault(session =>
+            string.Equals(session.OwnerEmail, email, StringComparison.OrdinalIgnoreCase)
+            && session.Status is UploadSessionStatus.Started or UploadSessionStatus.Uploading
+            && session.FileSize == fileSize
+            && session.ChunkSize == chunkSize
+            && string.Equals(session.RequestedPath, requestedPath, StringComparison.Ordinal)
+            && string.Equals(session.LastModified, lastModified, StringComparison.Ordinal));
+
+        if (existing is not null)
+        {
+            existing.LastActivityAt = DateTimeOffset.UtcNow;
+            return UploadSessionJson(existing);
+        }
+
+        int activeForUser = uploadSessions.Values.Count(session =>
+            string.Equals(session.OwnerEmail, email, StringComparison.OrdinalIgnoreCase)
+            && session.Status is UploadSessionStatus.Started or UploadSessionStatus.Uploading);
+
+        if (activeForUser >= options.MaxUploadSessionsPerUser)
+        {
+            return Json(new { error = "too_many_upload_sessions" }, 429, "Too Many Requests");
+        }
+
+        string uploadId = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(18));
+        string tempDirectory = Path.Combine(Path.GetTempPath(), "SkyVault", "chunk-uploads", uploadId);
+        Directory.CreateDirectory(tempDirectory);
+
+        var session = new UploadSession(
+            uploadId,
+            email,
+            fileName,
+            requestedPath,
+            NormalizeCloudPath(currentDirectory),
+            uploadRelativePath,
+            lastModified,
+            fileSize,
+            chunkSize,
+            tempDirectory,
+            DateTimeOffset.UtcNow);
+
+        uploadSessions[uploadId] = session;
+        await Task.CompletedTask.WaitAsync(cancellationToken);
+        return UploadSessionJson(session);
+    }
+
+    private async Task<HttpResponse> HandleChunkUploadChunkAsync(HttpRequest request, string? email, string uploadId, int chunkIndex, CancellationToken cancellationToken)
+    {
+        if (email is null)
+        {
+            return Json(new { error = "not_authenticated" }, 401, "Unauthorized");
+        }
+
+        if (!TryGetOwnedUploadSession(email, uploadId, out UploadSession? session))
+        {
+            return Json(new { error = "upload_not_found" }, 404, "Not Found");
+        }
+
+        if (session is null)
+        {
+            throw new InvalidOperationException("Upload session lookup returned null.");
+        }
+
+        if (session.Status is UploadSessionStatus.Completed or UploadSessionStatus.Cancelled)
+        {
+            return Json(new { error = "upload_closed" }, 409, "Conflict");
+        }
+
+        int totalChunks = session.TotalChunks;
+        if (chunkIndex < 0 || chunkIndex >= totalChunks)
+        {
+            return Json(new { error = "invalid_chunk_index" }, 400, "Bad Request");
+        }
+
+        long expectedSize = GetExpectedChunkSize(session, chunkIndex);
+        if (request.ContentLength != expectedSize
+            || request.Body.LongLength != expectedSize
+            || request.ContentLength > session.ChunkSize
+            || request.ContentLength > options.MaxChunkUploadBytes)
+        {
+            return Json(new { error = "invalid_chunk_size", expectedSize }, 400, "Bad Request");
+        }
+
+        Directory.CreateDirectory(session.TempDirectory);
+        string chunkPath = GetChunkPath(session, chunkIndex);
+
+        if (File.Exists(chunkPath) && new FileInfo(chunkPath).Length == expectedSize)
+        {
+            session.MarkUploaded(chunkIndex);
+            session.LastActivityAt = DateTimeOffset.UtcNow;
+            return UploadSessionJson(session);
+        }
+
+        string tempChunkPath = chunkPath + ".tmp";
+        await File.WriteAllBytesAsync(tempChunkPath, request.Body, cancellationToken);
+
+        if (File.Exists(chunkPath))
+        {
+            File.Delete(chunkPath);
+        }
+
+        File.Move(tempChunkPath, chunkPath);
+        session.MarkUploaded(chunkIndex);
+        session.Status = UploadSessionStatus.Uploading;
+        session.LastActivityAt = DateTimeOffset.UtcNow;
+        return UploadSessionJson(session);
+    }
+
+    private HttpResponse HandleChunkUploadStatus(string? email, string uploadId)
+    {
+        if (email is null)
+        {
+            return Json(new { error = "not_authenticated" }, 401, "Unauthorized");
+        }
+
+        if (!TryGetOwnedUploadSession(email, uploadId, out UploadSession? session))
+        {
+            return Json(new { error = "upload_not_found" }, 404, "Not Found");
+        }
+
+        if (session is null)
+        {
+            throw new InvalidOperationException("Upload session lookup returned null.");
+        }
+
+        session.LastActivityAt = DateTimeOffset.UtcNow;
+        return UploadSessionJson(session);
+    }
+
+    private async Task<HttpResponse> HandleChunkUploadCompleteAsync(string? email, string? sessionId, string uploadId, CancellationToken cancellationToken)
+    {
+        if (email is null)
+        {
+            return Json(new { error = "not_authenticated" }, 401, "Unauthorized");
+        }
+
+        if (!TryGetOwnedUploadSession(email, uploadId, out UploadSession? session))
+        {
+            return Json(new { error = "upload_not_found" }, 404, "Not Found");
+        }
+
+        if (session is null)
+        {
+            throw new InvalidOperationException("Upload session lookup returned null.");
+        }
+
+        if (session.UploadedChunks.Count < session.TotalChunks)
+        {
+            return Json(new { error = "missing_chunks", uploadedChunks = session.UploadedChunks.Order().ToArray() }, 409, "Conflict");
+        }
+
+        if (session.FileSize > fileStorage.GetRemainingQuotaBytes(email))
+        {
+            return Json(new { error = "quota_exceeded" }, 429, "Too Many Requests");
+        }
+
+        string assembledPath = Path.Combine(session.TempDirectory, "assembled.upload");
+
+        try
+        {
+            await using (var output = new FileStream(assembledPath, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                for (int index = 0; index < session.TotalChunks; index += 1)
+                {
+                    string chunkPath = GetChunkPath(session, index);
+                    long expectedSize = GetExpectedChunkSize(session, index);
+
+                    if (!File.Exists(chunkPath) || new FileInfo(chunkPath).Length != expectedSize)
+                    {
+                        return Json(new { error = "missing_chunk", chunkIndex = index }, 409, "Conflict");
+                    }
+
+                    await using var input = new FileStream(chunkPath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    await input.CopyToAsync(output, 64 * 1024, cancellationToken);
+                }
+            }
+
+            if (new FileInfo(assembledPath).Length != session.FileSize)
+            {
+                DeleteFileQuietly(assembledPath);
+                return Json(new { error = "assembled_size_mismatch" }, 400, "Bad Request");
+            }
+
+            (FileCreateResult result, string savedPath) = await fileStorage.SaveUploadedTempFileAsync(email, session.RequestedPath, assembledPath, session.FileSize);
+
+            if (result != FileCreateResult.Created)
+            {
+                DeleteFileQuietly(assembledPath);
+                return Json(new { error = result.ToString() }, result == FileCreateResult.QuotaExceeded ? 429 : 400, result == FileCreateResult.QuotaExceeded ? "Too Many Requests" : "Bad Request");
+            }
+
+            session.Status = UploadSessionStatus.Completed;
+            session.SavedPath = savedPath;
+            session.LastActivityAt = DateTimeOffset.UtcNow;
+            TrackUploaded(sessionId, 1);
+            DeleteDirectoryQuietly(session.TempDirectory);
+            uploadSessions.TryRemove(session.UploadId, out _);
+            return Json(new { uploadId = session.UploadId, status = "done", savedPath });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            DeleteFileQuietly(assembledPath);
+            AppLog.Warn($"Chunk upload complete failed for {email}: {ex.Message}");
+            return Json(new { error = "complete_failed" }, 500, "Server Error");
+        }
+    }
+
+    private HttpResponse HandleChunkUploadCancel(string? email, string uploadId)
+    {
+        if (email is null)
+        {
+            return Json(new { error = "not_authenticated" }, 401, "Unauthorized");
+        }
+
+        if (!TryGetOwnedUploadSession(email, uploadId, out UploadSession? session))
+        {
+            return Json(new { error = "upload_not_found" }, 404, "Not Found");
+        }
+
+        if (session is null)
+        {
+            throw new InvalidOperationException("Upload session lookup returned null.");
+        }
+
+        session.Status = UploadSessionStatus.Cancelled;
+        DeleteDirectoryQuietly(session.TempDirectory);
+        uploadSessions.TryRemove(session.UploadId, out _);
+        return Json(new { uploadId, status = "cancelled" });
+    }
+
+    private HttpResponse UploadSessionJson(UploadSession session)
+    {
+        return Json(new
+        {
+            uploadId = session.UploadId,
+            filename = session.FileName,
+            fileSize = session.FileSize,
+            currentPath = session.CurrentPath,
+            relativePath = session.RelativePath,
+            chunkSize = session.ChunkSize,
+            totalChunks = session.TotalChunks,
+            uploadedChunks = session.UploadedChunks.Order().ToArray(),
+            status = session.Status.ToString().ToLowerInvariant(),
+            savedPath = session.SavedPath
+        });
+    }
+
+    private bool TryGetOwnedUploadSession(string email, string uploadId, out UploadSession? session)
+    {
+        session = null;
+
+        if (!IsValidUploadId(uploadId) || !uploadSessions.TryGetValue(uploadId, out UploadSession? found))
+        {
+            return false;
+        }
+
+        if (!string.Equals(found.OwnerEmail, email, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (found.CreatedAt.AddHours(options.UploadSessionTtlHours) < DateTimeOffset.UtcNow)
+        {
+            DeleteDirectoryQuietly(found.TempDirectory);
+            uploadSessions.TryRemove(uploadId, out _);
+            return false;
+        }
+
+        session = found;
+        return true;
+    }
+
+    private void CleanupExpiredUploadSessions()
+    {
+        DateTimeOffset cutoff = DateTimeOffset.UtcNow.AddHours(-options.UploadSessionTtlHours);
+
+        foreach (UploadSession session in uploadSessions.Values)
+        {
+            if (session.CreatedAt >= cutoff && session.LastActivityAt >= cutoff)
+            {
+                continue;
+            }
+
+            DeleteDirectoryQuietly(session.TempDirectory);
+            uploadSessions.TryRemove(session.UploadId, out _);
+        }
+    }
+
+    private static string GetChunkPath(UploadSession session, int chunkIndex)
+    {
+        return Path.Combine(session.TempDirectory, $"{chunkIndex:D10}.chunk");
+    }
+
+    private static long GetExpectedChunkSize(UploadSession session, int chunkIndex)
+    {
+        long offset = (long)chunkIndex * session.ChunkSize;
+        return Math.Min(session.ChunkSize, session.FileSize - offset);
+    }
+
+    private static bool IsUploadChunkPath(string path)
+    {
+        return TryParseUploadChunkPath(path, out _, out _);
+    }
+
+    private static bool IsUploadCompletePath(string path)
+    {
+        return TryParseUploadCompletePath(path, out _);
+    }
+
+    private static bool IsUploadCancelPath(string path)
+    {
+        return TryParseUploadCancelPath(path, out _);
+    }
+
+    private static bool TryParseUploadChunkPath(string path, out string uploadId, out int chunkIndex)
+    {
+        uploadId = "";
+        chunkIndex = -1;
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 5
+            && parts[0] == "api"
+            && parts[1] == "uploads"
+            && IsValidUploadId(parts[2])
+            && parts[3] == "chunks"
+            && int.TryParse(parts[4], out chunkIndex)
+            && chunkIndex >= 0
+            && (uploadId = parts[2]).Length > 0;
+    }
+
+    private static bool TryParseUploadStatusPath(string path, out string uploadId)
+    {
+        return TryParseUploadActionPath(path, "status", out uploadId);
+    }
+
+    private static bool TryParseUploadCompletePath(string path, out string uploadId)
+    {
+        return TryParseUploadActionPath(path, "complete", out uploadId);
+    }
+
+    private static bool TryParseUploadCancelPath(string path, out string uploadId)
+    {
+        return TryParseUploadActionPath(path, "cancel", out uploadId);
+    }
+
+    private static bool TryParseUploadActionPath(string path, string action, out string uploadId)
+    {
+        uploadId = "";
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 4
+            && parts[0] == "api"
+            && parts[1] == "uploads"
+            && IsValidUploadId(parts[2])
+            && parts[3] == action)
+        {
+            uploadId = parts[2];
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsValidUploadId(string uploadId)
+    {
+        return uploadId.Length is >= 16 and <= 80
+            && Regex.IsMatch(uploadId, "^[A-Za-z0-9_-]+$");
+    }
+
+    private static bool IsSafeUploadClientPath(string path, bool allowEmpty)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return allowEmpty;
+        }
+
+        if (path.Length > 1024
+            || path.Contains('\0', StringComparison.Ordinal)
+            || path.Contains('\\', StringComparison.Ordinal)
+            || Path.IsPathRooted(path))
+        {
+            return false;
+        }
+
+        string[] parts = path.Replace('\\', '/')
+            .Trim('/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        return parts.Length > 0
+            && parts.All(part =>
+                part.Length is > 0 and <= 255
+                && part != "."
+                && part != ".."
+                && !part.Contains("..", StringComparison.Ordinal)
+                && part.IndexOfAny(Path.GetInvalidFileNameChars()) < 0);
+    }
+
+    private static HttpResponse BuildDownloadResponse(HttpRequest request, FileDownload download, string contentType, bool inline)
+    {
+        long start = 0;
+        long end = download.Length - 1;
+        int statusCode = 200;
+        string reason = "OK";
+
+        if (TryParseRange(request.Headers.GetValueOrDefault("Range", ""), download.Length, out long rangeStart, out long rangeEnd))
+        {
+            start = rangeStart;
+            end = rangeEnd;
+            statusCode = 206;
+            reason = "Partial Content";
+        }
+
+        long contentLength = end >= start ? end - start + 1 : 0;
+
+        if (download.Stream.CanSeek)
+        {
+            download.Stream.Seek(start, SeekOrigin.Begin);
+        }
+
+        var response = new HttpResponse(statusCode, reason, contentType, contentLength, _ => Task.FromResult<Stream?>(download.Stream));
+        response.Headers["Content-Disposition"] = $"{(inline ? "inline" : "attachment")}; filename=\"{EscapeHeaderFileName(Path.GetFileName(download.RelativePath))}\"";
+        response.Headers["Last-Modified"] = download.ModifiedAtUtc.ToString("R");
+        response.Headers["Accept-Ranges"] = "bytes";
+
+        if (statusCode == 206)
+        {
+            response.Headers["Content-Range"] = $"bytes {start}-{end}/{download.Length}";
+        }
+
+        return response;
+    }
+
+    private static bool TryParseRange(string rangeHeader, long length, out long start, out long end)
+    {
+        start = 0;
+        end = Math.Max(0, length - 1);
+
+        if (length <= 0 || string.IsNullOrWhiteSpace(rangeHeader) || !rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string range = rangeHeader["bytes=".Length..].Split(',', 2)[0].Trim();
+        string[] parts = range.Split('-', 2);
+
+        if (parts.Length != 2)
+        {
+            return false;
+        }
+
+        if (parts[0].Length == 0)
+        {
+            if (!long.TryParse(parts[1], out long suffixLength) || suffixLength <= 0)
+            {
+                return false;
+            }
+
+            start = Math.Max(0, length - suffixLength);
+            end = length - 1;
+            return true;
+        }
+
+        if (!long.TryParse(parts[0], out start) || start < 0 || start >= length)
+        {
+            return false;
+        }
+
+        if (parts[1].Length == 0)
+        {
+            end = length - 1;
+            return true;
+        }
+
+        if (!long.TryParse(parts[1], out end) || end < start)
+        {
+            return false;
+        }
+
+        end = Math.Min(end, length - 1);
+        return true;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024 * 1024)
+        {
+            return (bytes / 1024d / 1024 / 1024).ToString("0.##", CultureInfo.InvariantCulture) + " GB";
+        }
+
+        if (bytes >= 1024L * 1024)
+        {
+            return (bytes / 1024d / 1024).ToString("0.##", CultureInfo.InvariantCulture) + " MB";
+        }
+
+        if (bytes >= 1024)
+        {
+            return (bytes / 1024d).ToString("0.##", CultureInfo.InvariantCulture) + " KB";
+        }
+
+        return bytes + " B";
     }
 
     private UserAccount? GetUser(string? email)
@@ -947,6 +1790,13 @@ public sealed class CloudWebServer
         return new HttpResponse(statusCode, reason, body);
     }
 
+    private static HttpResponse Json(object payload, int statusCode = 200, string reason = "OK")
+    {
+        var response = new HttpResponse(statusCode, reason, JsonSerializer.Serialize(payload), "application/json; charset=utf-8");
+        response.Headers["Cache-Control"] = "no-store";
+        return response;
+    }
+
     private static HttpResponse StaticFile(string path, string contentType)
     {
         if (!File.Exists(path))
@@ -1027,6 +1877,29 @@ public sealed class CloudWebServer
             .ToArray();
 
         return string.Join('/', parts);
+    }
+
+    private static bool IsSafeCloudPath(string path, bool allowEmpty)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return allowEmpty;
+        }
+
+        if (Path.IsPathRooted(path)
+            || path.Contains('\\', StringComparison.Ordinal)
+            || path.Contains('\0', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string[] parts = path.Trim()
+            .Replace('\\', '/')
+            .Trim('/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        return parts.Length > 0
+            && parts.All(part => part != "." && part != ".." && !part.Contains("..", StringComparison.Ordinal));
     }
 
     private static string NormalizeView(string view)
@@ -1137,9 +2010,9 @@ public sealed class CloudWebServer
         return parts.Count == 0 ? "Select files first." : string.Join(' ', parts);
     }
 
-    private static int ParseMultipartInt(HttpRequest request, string fieldName, int fallback)
+    private static int ParseMultipartInt(Dictionary<string, string> fields, string fieldName, int fallback)
     {
-        return int.TryParse(request.GetMultipartField(fieldName), out int value) ? value : fallback;
+        return int.TryParse(fields.GetValueOrDefault(fieldName), out int value) ? value : fallback;
     }
 
     private static string BuildUploadSummary(
@@ -1178,6 +2051,98 @@ public sealed class CloudWebServer
         }
 
         return parts.Count == 0 ? "Could not upload file." : string.Join(' ', parts);
+    }
+
+    private static void DeleteFileQuietly(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup only.
+        }
+    }
+
+    private static void DeleteDirectoryQuietly(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup only.
+        }
+    }
+}
+
+public enum UploadSessionStatus
+{
+    Started,
+    Uploading,
+    Completed,
+    Cancelled
+}
+
+public sealed class UploadSession
+{
+    private readonly ConcurrentDictionary<int, byte> uploadedChunks = new();
+
+    public UploadSession(
+        string uploadId,
+        string ownerEmail,
+        string fileName,
+        string requestedPath,
+        string currentPath,
+        string relativePath,
+        string lastModified,
+        long fileSize,
+        int chunkSize,
+        string tempDirectory,
+        DateTimeOffset createdAt)
+    {
+        UploadId = uploadId;
+        OwnerEmail = ownerEmail;
+        FileName = fileName;
+        RequestedPath = requestedPath;
+        CurrentPath = currentPath;
+        RelativePath = relativePath;
+        LastModified = lastModified;
+        FileSize = fileSize;
+        ChunkSize = chunkSize;
+        TempDirectory = tempDirectory;
+        CreatedAt = createdAt;
+        LastActivityAt = createdAt;
+    }
+
+    public string UploadId { get; }
+    public string OwnerEmail { get; }
+    public string FileName { get; }
+    public string RequestedPath { get; }
+    public string CurrentPath { get; }
+    public string RelativePath { get; }
+    public string LastModified { get; }
+    public long FileSize { get; }
+    public int ChunkSize { get; }
+    public string TempDirectory { get; }
+    public DateTimeOffset CreatedAt { get; }
+    public DateTimeOffset LastActivityAt { get; set; }
+    public UploadSessionStatus Status { get; set; } = UploadSessionStatus.Started;
+    public string SavedPath { get; set; } = "";
+    public int TotalChunks => (int)Math.Ceiling(FileSize / (double)ChunkSize);
+    public IReadOnlyCollection<int> UploadedChunks => uploadedChunks.Keys.ToArray();
+
+    public void MarkUploaded(int chunkIndex)
+    {
+        uploadedChunks[chunkIndex] = 1;
     }
 }
 

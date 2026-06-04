@@ -11,6 +11,7 @@ public sealed class FileStorage
     private readonly IReadOnlyList<string> rootPaths;
     private readonly string storageMode;
     private readonly UserStore userStore;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> userFileLocks = new(StringComparer.OrdinalIgnoreCase);
 
     public FileStorage(string rootPath, UserStore userStore)
         : this([rootPath], "single", userStore)
@@ -135,6 +136,7 @@ public sealed class FileStorage
     public async Task<FileCreateResult> CreateTextFileAsync(string username, string fileName, string content)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         string relativePath = NormalizeRelativePath(fileName);
 
         if (!IsValidRelativePath(relativePath))
@@ -178,18 +180,24 @@ public sealed class FileStorage
     public Task<FileCreateResult> CreateFolderAsync(string username, string folderName)
     {
         username = NormalizeEmail(username);
+        return CreateFolderInternalAsync(username, folderName);
+    }
+
+    private async Task<FileCreateResult> CreateFolderInternalAsync(string username, string folderName)
+    {
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         string relativePath = NormalizeRelativePath(folderName);
 
         if (!IsValidRelativePath(relativePath))
         {
-            return Task.FromResult(FileCreateResult.InvalidFileName);
+            return FileCreateResult.InvalidFileName;
         }
 
         UserAccount? user = userStore.GetUser(username);
 
         if (user is null)
         {
-            return Task.FromResult(FileCreateResult.Failed);
+            return FileCreateResult.Failed;
         }
 
         foreach (string directory in GetUserDirectories(username))
@@ -197,12 +205,13 @@ public sealed class FileStorage
             Directory.CreateDirectory(GetSafeUserPath(directory, relativePath));
         }
 
-        return Task.FromResult(FileCreateResult.Created);
+        return FileCreateResult.Created;
     }
 
     public async Task<FileCreateResult> SaveUploadedFileAsync(string username, MultipartFile file)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         string relativePath = NormalizeRelativePath(file.FileName);
 
         if (!IsValidRelativePath(relativePath))
@@ -242,6 +251,97 @@ public sealed class FileStorage
         return FileCreateResult.Created;
     }
 
+    public async Task<(FileCreateResult Result, string SavedPath)> SaveUploadedTempFileAsync(string username, string requestedPath, string tempPath, long length)
+    {
+        username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
+
+        if (!IsSafeUploadPath(requestedPath))
+        {
+            return (FileCreateResult.InvalidFileName, "");
+        }
+
+        string relativePath = NormalizeRelativePath(requestedPath);
+
+        if (!IsValidRelativePath(relativePath))
+        {
+            return (FileCreateResult.InvalidFileName, "");
+        }
+
+        UserAccount? user = userStore.GetUser(username);
+
+        if (user is null || !File.Exists(tempPath))
+        {
+            return (FileCreateResult.Failed, "");
+        }
+
+        string targetRelativePath = GetAvailableUploadPath(username, relativePath);
+        long currentUsed = GetUsedBytes(username);
+        long nextUsed = currentUsed + length;
+
+        if (nextUsed > user.QuotaBytes)
+        {
+            return (FileCreateResult.QuotaExceeded, "");
+        }
+
+        IReadOnlyList<string> writeDirectories = GetWriteDirectories(username, targetRelativePath);
+        string primaryPath = GetSafeUserPath(writeDirectories[0], targetRelativePath);
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(primaryPath) ?? writeDirectories[0]);
+
+            if (File.Exists(primaryPath) || Directory.Exists(primaryPath))
+            {
+                return (FileCreateResult.Failed, "");
+            }
+
+            File.Move(tempPath, primaryPath);
+
+            foreach (string writeDirectory in writeDirectories.Skip(1))
+            {
+                string writePath = GetSafeUserPath(writeDirectory, targetRelativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(writePath) ?? writeDirectory);
+                File.Copy(primaryPath, writePath, overwrite: false);
+            }
+
+            await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
+            return (FileCreateResult.Created, targetRelativePath);
+        }
+        catch
+        {
+            if (File.Exists(primaryPath))
+            {
+                File.Delete(primaryPath);
+            }
+
+            foreach (string writeDirectory in writeDirectories.Skip(1))
+            {
+                string writePath = GetSafeUserPath(writeDirectory, targetRelativePath);
+
+                if (File.Exists(writePath))
+                {
+                    File.Delete(writePath);
+                }
+            }
+
+            return (FileCreateResult.Failed, "");
+        }
+    }
+
+    public long GetRemainingQuotaBytes(string username)
+    {
+        username = NormalizeEmail(username);
+        UserAccount? user = userStore.GetUser(username);
+
+        if (user is null)
+        {
+            return 0;
+        }
+
+        return Math.Max(0, user.QuotaBytes - GetUsedBytes(username));
+    }
+
     public async Task<byte[]?> ReadFileAsync(string username, string fileName)
     {
         username = NormalizeEmail(username);
@@ -263,6 +363,33 @@ public sealed class FileStorage
         }
 
         return null;
+    }
+
+    public Task<FileDownload?> OpenReadStreamAsync(string username, string fileName)
+    {
+        username = NormalizeEmail(username);
+        string relativePath = NormalizeRelativePath(fileName);
+
+        if (!IsValidRelativePath(relativePath))
+        {
+            return Task.FromResult<FileDownload?>(null);
+        }
+
+        foreach (string directory in GetUserDirectories(username))
+        {
+            string path = GetSafeUserPath(directory, relativePath);
+
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            var info = new FileInfo(path);
+            Stream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return Task.FromResult<FileDownload?>(new FileDownload(relativePath, info.Length, info.LastWriteTimeUtc, stream));
+        }
+
+        return Task.FromResult<FileDownload?>(null);
     }
 
     public async Task<byte[]?> CreateZipAsync(string username, IReadOnlyList<string> fileNames)
@@ -301,9 +428,41 @@ public sealed class FileStorage
         return zipBytes.Length == 0 ? null : zipBytes.ToArray();
     }
 
+    public long GetTotalSizeBytes(string username, IReadOnlyList<string> fileNames)
+    {
+        username = NormalizeEmail(username);
+        long total = 0;
+
+        foreach (string rawFileName in fileNames)
+        {
+            string relativePath = NormalizeRelativePath(rawFileName);
+
+            if (!IsValidRelativePath(relativePath))
+            {
+                continue;
+            }
+
+            foreach (string directory in GetUserDirectories(username))
+            {
+                string path = GetSafeUserPath(directory, relativePath);
+
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+
+                total += new FileInfo(path).Length;
+                break;
+            }
+        }
+
+        return total;
+    }
+
     public async Task<int> MoveToTrashAsync(string username, IReadOnlyList<string> fileNames)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         PurgeExpiredTrash(username);
         int moved = 0;
         string trashBatch = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
@@ -352,6 +511,7 @@ public sealed class FileStorage
     public async Task<int> EmptyTrashAsync(string username)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         PurgeExpiredTrash(username);
         int deleted = 0;
 
@@ -385,6 +545,7 @@ public sealed class FileStorage
         bool overwriteExisting = false)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         PurgeExpiredTrash(username);
         int restored = 0;
         int skippedBecauseExists = 0;
@@ -464,6 +625,7 @@ public sealed class FileStorage
     public async Task<int> DeleteFromTrashAsync(string username, IReadOnlyList<string> fileNames)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         PurgeExpiredTrash(username);
         int deleted = 0;
 
@@ -505,7 +667,7 @@ public sealed class FileStorage
         return deleted;
     }
 
-    public Task<(int Moved, int SkippedExisting, int Missing)> MoveFilesAsync(
+    public async Task<(int Moved, int SkippedExisting, int Missing)> MoveFilesAsync(
         string username,
         IReadOnlyList<string> fileNames,
         string destinationDirectory,
@@ -513,42 +675,51 @@ public sealed class FileStorage
         string? newName = null)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         string normalizedDestination = NormalizeRelativePath(destinationDirectory);
         string normalizedNewName = NormalizeRelativePath(newName ?? "");
 
         if (normalizedDestination.Length > 0 && !IsValidRelativePath(normalizedDestination))
         {
-            return Task.FromResult((0, 0, 0));
+            return (0, 0, 0);
         }
 
         if (normalizedNewName.Length > 0 && !IsValidRelativePath(normalizedNewName))
         {
-            return Task.FromResult((0, 0, 0));
+            return (0, 0, 0);
         }
 
-        return MoveFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting, normalizedNewName);
+        return await MoveFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting, normalizedNewName);
     }
 
-    public Task<(int Copied, int SkippedExisting, int Missing)> CopyFilesAsync(
+    public async Task<(int Copied, int SkippedExisting, int Missing)> CopyFilesAsync(
         string username,
         IReadOnlyList<string> fileNames,
         string destinationDirectory,
         bool overwriteExisting = false)
     {
         username = NormalizeEmail(username);
+        await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         string normalizedDestination = NormalizeRelativePath(destinationDirectory);
 
         if (normalizedDestination.Length > 0 && !IsValidRelativePath(normalizedDestination))
         {
-            return Task.FromResult((0, 0, 0));
+            return (0, 0, 0);
         }
 
-        return CopyFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting);
+        return await CopyFilesInternalAsync(username, fileNames, normalizedDestination, overwriteExisting);
     }
 
     private IEnumerable<string> GetUserDirectories(string username)
     {
         return rootPaths.Select(rootPath => Path.Combine(rootPath, username));
+    }
+
+    private async Task<SemaphoreLease> AcquireUserFileLockAsync(string username)
+    {
+        SemaphoreSlim semaphore = userFileLocks.GetOrAdd(username, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync();
+        return new SemaphoreLease(semaphore);
     }
 
     private void PurgeExpiredTrash(string username)
@@ -868,6 +1039,33 @@ public sealed class FileStorage
         return false;
     }
 
+    private string GetAvailableUploadPath(string username, string relativePath)
+    {
+        if (!PathExists(username, relativePath))
+        {
+            return relativePath;
+        }
+
+        string directory = ToDisplayPath(Path.GetDirectoryName(relativePath) ?? "").Trim('/');
+        string fileName = Path.GetFileNameWithoutExtension(relativePath);
+        string extension = Path.GetExtension(relativePath);
+
+        for (int index = 1; index < 10_000; index += 1)
+        {
+            string candidateName = $"{fileName} ({index}){extension}";
+            string candidatePath = string.IsNullOrEmpty(directory)
+                ? candidateName
+                : $"{directory}/{candidateName}";
+
+            if (!PathExists(username, candidatePath))
+            {
+                return candidatePath;
+            }
+        }
+
+        return $"{directory}/{Guid.NewGuid():N}{extension}".Trim('/');
+    }
+
     private void DeletePathAcrossReplicas(string username, string relativePath)
     {
         foreach (string directory in GetUserDirectories(username))
@@ -966,6 +1164,23 @@ public sealed class FileStorage
             && fileName.All(ch => !char.IsControl(ch) && ch != '/' && ch != '\\' && ch != '\0');
     }
 
+    private static bool IsSafeUploadPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)
+            || Path.IsPathRooted(path)
+            || path.Contains('\\', StringComparison.Ordinal)
+            || path.Contains('\0', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string normalized = path.Replace('\\', '/');
+        string[] parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        return parts.Length > 0
+            && parts.All(part => part != "." && part != ".." && !part.Contains("..", StringComparison.Ordinal));
+    }
+
     private static string GetSafeUserPath(string directory, string relativePath)
     {
         string[] parts = relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -1023,6 +1238,28 @@ public sealed class FileStorage
         return relativePath == ".trash" || relativePath.StartsWith(".trash/", StringComparison.Ordinal);
     }
 
+    private sealed class SemaphoreLease : IAsyncDisposable
+    {
+        private readonly SemaphoreSlim semaphore;
+        private bool disposed;
+
+        public SemaphoreLease(SemaphoreSlim semaphore)
+        {
+            this.semaphore = semaphore;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            if (!disposed)
+            {
+                semaphore.Release();
+                disposed = true;
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private static string NormalizeStorageMode(string mode)
     {
         mode = mode.Trim().ToLowerInvariant();
@@ -1036,3 +1273,5 @@ public sealed class FileStorage
         };
     }
 }
+
+public sealed record FileDownload(string RelativePath, long Length, DateTime ModifiedAtUtc, Stream Stream);

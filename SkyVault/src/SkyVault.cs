@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 
 const long bytesPerGb = 1024L * 1024 * 1024;
 long quotaGb = TryGetLongEnvironment("SKYVAULT_QUOTA_GB", out long configuredQuotaGb)
@@ -17,16 +18,20 @@ string[] fileStorageDirectories = storageDirectories
 
 Directory.CreateDirectory(dataDirectory);
 AppLog.Initialize("log.txt");
+ServerRuntime.InstanceId = Guid.NewGuid().ToString("N");
 
 var userStore = new UserStore(Path.Combine(dataDirectory, "users.json"), quotaBytes);
 await userStore.LoadAsync();
 
 var fileStorage = new FileStorage(fileStorageDirectories, storageMode, userStore);
 var emailSender = EmailSender.FromEnvironment();
-var server = new CloudWebServer(IPAddress.Any, port, userStore, fileStorage, emailSender);
+ServerOptions serverOptions = ServerOptions.FromEnvironment();
+var server = new CloudWebServer(IPAddress.Any, port, userStore, fileStorage, emailSender, serverOptions);
+using var shutdown = new CancellationTokenSource();
 
 AppLog.Info("SkyVault is running.");
 AppLog.Info($"Build: {BuildInfo.Version}");
+AppLog.Info($"Server session: {ServerRuntime.InstanceId}");
 AppLog.Info($"Open: http://127.0.0.1:{port}");
 AppLog.Info($"Data directory: {dataDirectory}");
 AppLog.Info($"Storage mode: {storageMode}");
@@ -34,6 +39,10 @@ AppLog.Info($"Storage locations: {string.Join(", ", fileStorageDirectories)}");
 AppLog.Info("User files are stored in: <storage location>/<email>/");
 AppLog.Info($"Default user quota: {quotaGb} GB");
 AppLog.Info($"CPU cores visible to .NET: {Environment.ProcessorCount}");
+AppLog.Info($"Server limits: connections={serverOptions.MaxConnections}, requests={serverOptions.MaxActiveRequests}, ui={serverOptions.MaxUiRequests}, uploads={serverOptions.MaxUploads}, downloads={serverOptions.MaxDownloads}, fileOps={serverOptions.MaxFileOperations}");
+AppLog.Info($"Per-user limits: uploads={serverOptions.MaxUploadsPerUser}, downloads={serverOptions.MaxDownloadsPerUser}, fileOps={serverOptions.MaxFileOperationsPerUser}");
+AppLog.Info($"Queue timeouts: ui={serverOptions.UiQueueTimeoutSeconds}s, upload={serverOptions.UploadQueueTimeoutSeconds}s, download={serverOptions.DownloadQueueTimeoutSeconds}s, fileOps={serverOptions.FileOperationQueueTimeoutSeconds}s");
+AppLog.Info($"I/O timeouts: header={serverOptions.HeaderReadTimeoutSeconds}s, idle={serverOptions.ClientIdleTimeoutSeconds}s, upload={serverOptions.UploadTimeoutSeconds}s, download={serverOptions.DownloadTimeoutSeconds}s");
 
 if (TryGetLongEnvironment("SKYVAULT_MAX_RAM_MB", out long configuredRamMb))
 {
@@ -47,7 +56,14 @@ if (!emailSender.IsConfigured)
 
 AppLog.Info("Press Ctrl+C to stop the server.");
 
-await server.StartAsync();
+Console.CancelKeyPress += (_, eventArgs) =>
+{
+    eventArgs.Cancel = true;
+    AppLog.Info("Shutdown requested. Stopping listener and waiting for active requests.");
+    shutdown.Cancel();
+};
+
+await server.StartAsync(shutdown.Token);
 
 static bool TryGetLongEnvironment(string name, out long value)
 {

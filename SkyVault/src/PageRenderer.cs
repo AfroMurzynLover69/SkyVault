@@ -117,6 +117,34 @@ public static class PageRenderer
         """);
     }
 
+    public static string RenderLargeFilePreview(string filePath, long length)
+    {
+        filePath = NormalizeCloudPath(filePath);
+        string fileName = GetDisplayName(filePath);
+        string parentDirectory = GetParentDirectory(filePath);
+        string backHref = parentDirectory.Length == 0 ? "/" : $"/?path={WebUtility.UrlEncode(parentDirectory)}";
+        string rawHref = $"/files/raw?path={WebUtility.UrlEncode(filePath)}";
+        string downloadHref = $"/files/download?path={WebUtility.UrlEncode(filePath)}";
+
+        return Layout($$"""
+        <section class="preview-shell">
+          <header class="preview-top">
+            <a class="button secondary" href="{{backHref}}">Back</a>
+            <div class="preview-title">
+              <p class="eyebrow">/home/{{Escape(parentDirectory)}}</p>
+              <h1>{{Escape(fileName)}}</h1>
+            </div>
+            <a class="button secondary" href="{{downloadHref}}">Download</a>
+          </header>
+          <section class="preview-panel text-preview">
+            <p>Ten plik ma {{FormatBytes(length)}}. Podgląd dużych plików nie jest ładowany do pamięci serwera.</p>
+            <p><a href="{{rawHref}}">Otwórz strumieniowo</a></p>
+            <p>Pobieranie obsługuje HTTP Range, więc duże pliki mogą być wznawiane.</p>
+          </section>
+        </section>
+        """);
+    }
+
     public static string RenderVerification(string email, string? message)
     {
         return Layout(RenderVerificationPanel(email, message));
@@ -257,15 +285,21 @@ public static class PageRenderer
         currentView = NormalizeView(currentView);
         bool trashMode = currentView == "trash";
         IReadOnlyList<FileEntry> visibleFiles = GetVisibleFiles(files, trashFiles, currentDirectory, currentView, starredPaths);
+        IReadOnlyList<FileEntry> renderedFiles = currentView == "home"
+            ? files
+                .OrderBy(file => file.IsFolder ? 0 : 1)
+                .ThenBy(file => GetDisplayName(file.Name), StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : visibleFiles;
         double usedPercent = account.QuotaBytes == 0 ? 0 : account.UsedBytes * 100.0 / account.QuotaBytes;
         usedPercent = Math.Clamp(usedPercent, 0, 100);
         string usedPercentText = usedPercent.ToString("0.##", CultureInfo.InvariantCulture);
-        string rows = visibleFiles.Count == 0
+        string rows = renderedFiles.Count == 0
             ? """<tr class="empty-row"><td colspan="4">Brak plików.</td></tr>"""
-            : string.Join("\n", visibleFiles.Select(file => RenderFileRow(file, currentView != "trash")));
-        string cards = visibleFiles.Count == 0
+            : string.Join("\n", renderedFiles.Select(file => RenderFileRow(file, currentView != "trash")));
+        string cards = renderedFiles.Count == 0
             ? """<p class="empty-grid">Brak plików.</p>"""
-            : string.Join("\n", visibleFiles.Select(file => RenderFileCard(file, currentView != "trash")));
+            : string.Join("\n", renderedFiles.Select(file => RenderFileCard(file, currentView != "trash")));
         string accountInitial = GetInitial(account.Username);
         string uploadInfo = message is null ? "No upload running." : Escape(message);
         bool computersMode = currentView == "computers";
@@ -425,6 +459,7 @@ public static class PageRenderer
             </nav>
 
             <div class="storage-summary">
+              <div class="upload-queue-list" id="uploadQueueList" hidden aria-label="Kolejka uploadów"></div>
               <a class="drive-row drive-storage-link" href="/storage">
                 <img class="nav-icon-img" src="/assets/icons/media-flash-sd-mmc.svg" alt="">
                 <span>Skydysk</span>
@@ -605,11 +640,14 @@ public static class PageRenderer
           const currentPath = document.getElementById('currentPath');
           const bar = document.getElementById('progressBar');
           const info = document.getElementById('uploadInfo');
+          const uploadQueueList = document.getElementById('uploadQueueList');
           const pathBar = document.querySelector('.path-bar');
           const pathEditor = document.getElementById('pathEditor');
           const pathEditorInput = document.getElementById('pathEditorInput');
           const pathBreadcrumbs = document.getElementById('pathBreadcrumbs');
-          const pathCrumbs = Array.from(document.querySelectorAll('.path-crumb'));
+          const pathUp = document.querySelector('.path-up');
+          const workspaceTitle = document.querySelector('.workspace-title h1');
+          let pathCrumbs = Array.from(document.querySelectorAll('.path-crumb'));
           const workspace = document.querySelector('.workspace');
           const rows = Array.from(document.querySelectorAll('#fileRows tr[data-file-name]'));
           const filesPanel = document.getElementById('filesPanel');
@@ -659,6 +697,11 @@ public static class PageRenderer
           const contextMenuMoveHere = contextMenu.querySelector('[data-action="move-selected-here"]');
           const moveDragType = 'application/x-skyvault-move-paths';
           const fileClipboardStorageKey = 'skyvaultFileClipboard';
+          const uploadResumeStorageKey = 'skyvaultUploadQueue';
+          const serverSessionId = '{{Escape(ServerRuntime.InstanceId)}}';
+          const uploadChunkSize = 8 * 1024 * 1024;
+          const uploadConcurrency = 2;
+          const uploadRetryDelays = [1000, 2000, 5000];
           let currentSort = 'modified';
           let sortDirection = 'desc';
           let autoUploadAfterPick = false;
@@ -677,6 +720,10 @@ public static class PageRenderer
           let searchQuery = '';
           let typeFilter = 'all';
           let modifiedFilter = 'all';
+          let currentDirectoryPath = normalizeCloudPath(currentPath.value);
+          let uploadQueue = [];
+          let activeUploadWorkers = 0;
+          let uploadQueueChangedDuringRun = false;
           const selectedPaths = new Set();
           let fileClipboard = loadFileClipboard();
 
@@ -688,6 +735,9 @@ public static class PageRenderer
           document.body.appendChild(selectionBox);
           hidePathEditor();
           focusSelectedPath(new URLSearchParams(window.location.search).get('focus') || '');
+          setupPathCrumbDropTargets();
+          loadPersistedUploadQueue();
+          renderUploadQueue();
 
           settingsToggle.addEventListener('click', () => {
             settingsPanel.hidden = !settingsPanel.hidden;
@@ -738,39 +788,9 @@ public static class PageRenderer
             await moveDraggedFiles(getDraggedMovePaths(event.dataTransfer), currentPath.value);
           });
 
-          pathCrumbs.forEach((crumb) => {
-            crumb.addEventListener('dragover', (event) => {
-              if (!hasMoveDrag(event.dataTransfer)) {
-                return;
-              }
-
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'move';
-              crumb.classList.add('is-drop-target');
-            });
-
-            crumb.addEventListener('dragleave', (event) => {
-              if (!hasMoveDrag(event.dataTransfer)) {
-                return;
-              }
-
-              crumb.classList.remove('is-drop-target');
-            });
-
-            crumb.addEventListener('drop', async (event) => {
-              if (!hasMoveDrag(event.dataTransfer)) {
-                return;
-              }
-
-              event.preventDefault();
-              crumb.classList.remove('is-drop-target');
-              await moveDraggedFiles(getDraggedMovePaths(event.dataTransfer), crumb.dataset.targetPath || '');
-            });
-          });
-
           pathEditor.addEventListener('submit', (event) => {
             event.preventDefault();
-            window.location.href = pathToUrl(pathEditorInput.value);
+            navigateToFolder(pathFromEditorValue(pathEditorInput.value));
           });
 
           pathEditor.querySelector('[data-editor-action="clear"]').addEventListener('click', () => {
@@ -1158,6 +1178,14 @@ public static class PageRenderer
           });
 
           document.addEventListener('click', (event) => {
+            const folderLink = event.target.closest('a[href^="/?path"], a[href="/"]');
+
+            if (folderLink && shouldHandleFolderNavigation(event, folderLink)) {
+              event.preventDefault();
+              navigateToFolder(new URL(folderLink.href, window.location.href).searchParams.get('path') || '');
+              return;
+            }
+
             if (!contextMenu.contains(event.target)) {
               hideContextMenu();
             }
@@ -1322,6 +1350,36 @@ public static class PageRenderer
             }
           });
 
+          uploadQueueList.addEventListener('click', async (event) => {
+            const button = event.target.closest('button[data-upload-action]');
+
+            if (!button) {
+              return;
+            }
+
+            const item = uploadQueue.find((entry) => entry.localId === button.dataset.uploadId);
+
+            if (!item) {
+              return;
+            }
+
+            const action = button.dataset.uploadAction;
+
+            if (action === 'pause') {
+              pauseUploadItem(item);
+              return;
+            }
+
+            if (action === 'resume') {
+              resumeUploadItem(item);
+              return;
+            }
+
+            if (action === 'cancel') {
+              await cancelUploadItem(item);
+            }
+          });
+
           async function uploadFileItems(items, diagnostics = {}) {
             const uploadItems = items.filter((item) => item.file);
 
@@ -1330,64 +1388,460 @@ public static class PageRenderer
               return;
             }
 
-            const data = new FormData();
-            data.append('currentPath', currentPath.value);
-            data.append('uploadSource', diagnostics.source || 'unknown');
-            data.append('clientItemCount', String(diagnostics.items ?? uploadItems.length));
-            data.append('clientFileCount', String(diagnostics.files ?? uploadItems.length));
-            data.append('clientCollectedCount', String(diagnostics.collected ?? uploadItems.length));
+            const added = [];
+            for (const rawItem of uploadItems) {
+              const validationError = validateUploadItem(rawItem);
+              const localId = buildUploadLocalId(rawItem);
+              const persisted = loadPersistedUploads().find((entry) => entry.localId === localId);
+              const existingQueueItem = uploadQueue.find((entry) => entry.localId === localId && !entry.file);
 
-            for (const item of uploadItems) {
-              data.append('file', item.file, item.path || item.file.name);
+              if (existingQueueItem) {
+                existingQueueItem.file = rawItem.file;
+                existingQueueItem.status = validationError ? 'błąd' : 'oczekuje';
+                existingQueueItem.error = validationError;
+                existingQueueItem.chunkProgressBytes = 0;
+                existingQueueItem.speedBytes = 0;
+                added.push(existingQueueItem);
+                continue;
+              }
+
+              const queueItem = {
+                localId,
+                uploadId: persisted?.uploadId || '',
+                file: rawItem.file,
+                name: rawItem.file.name,
+                size: rawItem.file.size,
+                lastModified: String(rawItem.file.lastModified || ''),
+                currentPath: currentDirectoryPath,
+                relativePath: normalizeUploadRelativePath(rawItem.path || rawItem.file.webkitRelativePath || rawItem.file.name),
+                chunkSize: persisted?.chunkSize || uploadChunkSize,
+                uploadedChunks: new Set(persisted?.uploadedChunks || []),
+                status: validationError ? 'błąd' : 'oczekuje',
+                error: validationError,
+                bytesUploaded: 0,
+                chunkProgressBytes: 0,
+                speedBytes: 0,
+                startedAt: 0,
+                updatedAt: Date.now(),
+                xhr: null
+              };
+
+              queueItem.totalChunks = Math.ceil(queueItem.size / queueItem.chunkSize);
+              queueItem.bytesUploaded = Math.min(queueItem.uploadedChunks.size * queueItem.chunkSize, queueItem.size);
+              uploadQueue.push(queueItem);
+              added.push(queueItem);
             }
 
-            try {
-              const response = await uploadFiles(data, uploadItems);
+            input.value = '';
+            folderInput.value = '';
+            persistUploadQueue();
+            renderUploadQueue();
+            pumpUploadQueue();
+            info.textContent = 'Dodano ' + added.length + ' plik(i) do kolejki uploadu.';
+          }
 
-              input.value = '';
-              folderInput.value = '';
-              document.open();
-              document.write(response);
-              document.close();
-            } catch {
-              info.textContent = 'Upload failed.';
+          function validateUploadItem(item) {
+            const relativePath = normalizeUploadRelativePath(item.path || item.file.webkitRelativePath || item.file.name);
+            const name = item.file.name || '';
+
+            if (!name.trim()) {
+              return 'Pusta nazwa pliku.';
+            }
+
+            if (item.file.size <= 0) {
+              return 'Pusty plik.';
+            }
+
+            if (name.length > 255 || relativePath.length > 1024) {
+              return 'Nazwa lub ścieżka jest za długa.';
+            }
+
+            if (relativePath.includes('../') || relativePath.includes('..\\\\') || relativePath.includes('..') || relativePath.startsWith('/')) {
+              return 'Niebezpieczna ścieżka pliku.';
+            }
+
+            if (/[\0<>:"|?*]/.test(relativePath)) {
+              return 'Nieobsługiwany znak w nazwie.';
+            }
+
+            return '';
+          }
+
+          function normalizeUploadRelativePath(path) {
+            return normalizeCloudPath(path || '').replace(/^\/+|\/+$/g, '') || 'upload';
+          }
+
+          function buildUploadLocalId(item) {
+            const path = normalizeUploadRelativePath(item.path || item.file.webkitRelativePath || item.file.name);
+            return [path, item.file.size, item.file.lastModified || 0].join('|');
+          }
+
+          function pumpUploadQueue() {
+            while (activeUploadWorkers < uploadConcurrency) {
+              const next = uploadQueue.find((item) => item.file && item.status === 'oczekuje');
+
+              if (!next) {
+                break;
+              }
+
+              activeUploadWorkers += 1;
+              runUploadItem(next).finally(() => {
+                activeUploadWorkers = Math.max(activeUploadWorkers - 1, 0);
+                renderUploadQueue();
+                persistUploadQueue();
+                if (uploadQueue.some((item) => item.status === 'oczekuje')) {
+                  pumpUploadQueue();
+                  return;
+                }
+
+                if (activeUploadWorkers === 0 && uploadQueueChangedDuringRun) {
+                  uploadQueueChangedDuringRun = false;
+                  info.textContent = 'Upload zakończony. Odświeżam listę plików...';
+                  window.location.href = currentDirectoryPath ? '/?path=' + encodeURIComponent(currentDirectoryPath) : '/';
+                }
+              });
             }
           }
 
-          function uploadFiles(data, items) {
+          async function runUploadItem(item) {
+            if (!item.file || item.status === 'anulowano') {
+              return;
+            }
+
+            item.status = item.uploadId ? 'wznawianie' : 'wysyłanie';
+            item.startedAt = Date.now();
+            item.error = '';
+            renderUploadQueue();
+
+            try {
+              const started = await startOrResumeUpload(item);
+              item.uploadId = started.uploadId;
+              item.chunkSize = started.chunkSize || item.chunkSize;
+              item.totalChunks = started.totalChunks || Math.ceil(item.size / item.chunkSize);
+              item.uploadedChunks = new Set(started.uploadedChunks || []);
+              item.bytesUploaded = Math.min(item.uploadedChunks.size * item.chunkSize, item.size);
+              item.status = 'wysyłanie';
+              persistUploadQueue();
+
+              for (let chunkIndex = 0; chunkIndex < item.totalChunks; chunkIndex += 1) {
+                if (item.status === 'pauza' || item.status === 'anulowano') {
+                  return;
+                }
+
+                if (item.uploadedChunks.has(chunkIndex)) {
+                  continue;
+                }
+
+                await uploadChunkWithRetry(item, chunkIndex);
+                item.uploadedChunks.add(chunkIndex);
+                item.bytesUploaded = Math.min(item.uploadedChunks.size * item.chunkSize, item.size);
+                item.chunkProgressBytes = 0;
+                item.updatedAt = Date.now();
+                persistUploadQueue();
+                renderUploadQueue();
+              }
+
+              await completeUploadItem(item);
+              item.status = 'gotowe';
+              item.bytesUploaded = item.size;
+              item.chunkProgressBytes = 0;
+              uploadQueueChangedDuringRun = true;
+              removePersistedUpload(item.localId);
+              renderUploadQueue();
+            } catch (error) {
+              if (item.status === 'pauza' || item.status === 'anulowano') {
+                return;
+              }
+
+              item.status = 'błąd';
+              item.error = error?.message || 'Upload failed.';
+              persistUploadQueue();
+              renderUploadQueue();
+            }
+          }
+
+          async function startOrResumeUpload(item) {
+            if (item.uploadId) {
+              try {
+                const status = await fetchUploadJson('/api/uploads/' + encodeURIComponent(item.uploadId) + '/status');
+                return status;
+              } catch {
+                item.uploadId = '';
+                item.uploadedChunks = new Set();
+                item.bytesUploaded = 0;
+              }
+            }
+
+            const data = new URLSearchParams();
+            data.set('uploadId', item.uploadId || '');
+            data.set('filename', item.name);
+            data.set('fileSize', String(item.size));
+            data.set('currentPath', item.currentPath);
+            data.set('relativePath', item.relativePath);
+            data.set('chunkSize', String(item.chunkSize));
+            data.set('lastModified', item.lastModified);
+            return await fetchUploadJson('/api/uploads/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: data.toString()
+            });
+          }
+
+          async function uploadChunkWithRetry(item, chunkIndex) {
+            let lastError = null;
+
+            for (let attempt = 0; attempt <= uploadRetryDelays.length; attempt += 1) {
+              try {
+                await uploadChunk(item, chunkIndex);
+                return;
+              } catch (error) {
+                if (item.status === 'pauza' || item.status === 'anulowano') {
+                  throw error;
+                }
+
+                lastError = error;
+                if (attempt < uploadRetryDelays.length) {
+                  item.error = 'Ponawiam chunk ' + (chunkIndex + 1) + '/' + item.totalChunks + '...';
+                  renderUploadQueue();
+                  await delay(uploadRetryDelays[attempt]);
+                }
+              }
+            }
+
+            throw lastError || new Error('Chunk failed.');
+          }
+
+          function uploadChunk(item, chunkIndex) {
             return new Promise((resolve, reject) => {
-              const startedAt = Date.now();
+              const start = chunkIndex * item.chunkSize;
+              const end = Math.min(start + item.chunkSize, item.size);
+              const chunk = item.file.slice(start, end);
               const request = new XMLHttpRequest();
-              const label = items.length === 1 ? items[0].path : items.length + ' files';
+              const startedAt = Date.now();
+              item.xhr = request;
+              item.chunkProgressBytes = 0;
 
               request.upload.addEventListener('progress', (event) => {
                 if (!event.lengthComputable) {
-                  info.textContent = 'Uploading ' + label + '...';
                   return;
                 }
 
-                const percent = Math.round((event.loaded / event.total) * 100);
+                item.chunkProgressBytes = event.loaded;
                 const seconds = Math.max((Date.now() - startedAt) / 1000, 0.1);
-                const speed = event.loaded / seconds;
-                bar.style.width = percent + '%';
-                info.textContent = percent + '% - ' + formatBytes(speed) + '/s';
+                item.speedBytes = event.loaded / seconds;
+                item.updatedAt = Date.now();
+                renderUploadQueue();
               });
 
               request.addEventListener('load', () => {
+                item.xhr = null;
+                item.chunkProgressBytes = 0;
                 if (request.status >= 200 && request.status < 300) {
-                  resolve(request.responseText);
+                  resolve();
                   return;
                 }
 
-                reject();
+                reject(new Error('Chunk HTTP ' + request.status));
               });
 
-              request.addEventListener('error', reject);
-              request.open('POST', '/files/upload');
-              bar.style.width = '0%';
-              info.textContent = 'Starting ' + label + '...';
-              request.send(data);
+              request.addEventListener('error', () => {
+                item.xhr = null;
+                reject(new Error('Network error'));
+              });
+
+              request.addEventListener('abort', () => {
+                item.xhr = null;
+                reject(new Error('Upload paused'));
+              });
+
+              request.open('PUT', '/api/uploads/' + encodeURIComponent(item.uploadId) + '/chunks/' + chunkIndex);
+              request.setRequestHeader('Content-Type', 'application/octet-stream');
+              request.send(chunk);
             });
+          }
+
+          async function completeUploadItem(item) {
+            await fetchUploadJson('/api/uploads/' + encodeURIComponent(item.uploadId) + '/complete', { method: 'POST' });
+          }
+
+          function pauseUploadItem(item) {
+            if (!['wysyłanie', 'wznawianie', 'oczekuje'].includes(item.status)) {
+              return;
+            }
+
+            item.status = 'pauza';
+            item.xhr?.abort();
+            persistUploadQueue();
+            renderUploadQueue();
+          }
+
+          function resumeUploadItem(item) {
+            if (!item.file) {
+              item.error = 'Wybierz ten sam plik ponownie, żeby wznowić po odświeżeniu strony.';
+              renderUploadQueue();
+              return;
+            }
+
+            item.status = 'oczekuje';
+            item.error = '';
+            persistUploadQueue();
+            renderUploadQueue();
+            pumpUploadQueue();
+          }
+
+          async function cancelUploadItem(item) {
+            item.status = 'anulowano';
+            item.xhr?.abort();
+
+            if (item.uploadId) {
+              try {
+                await fetchUploadJson('/api/uploads/' + encodeURIComponent(item.uploadId) + '/cancel', { method: 'POST' });
+              } catch {
+                item.error = 'Nie udało się anulować sesji na serwerze.';
+              }
+            }
+
+            removePersistedUpload(item.localId);
+            renderUploadQueue();
+          }
+
+          async function fetchUploadJson(url, options = {}) {
+            const response = await fetch(url, options);
+            const payload = await response.json().catch(() => ({}));
+
+            if (!response.ok || payload.error) {
+              throw new Error(payload.error || ('HTTP ' + response.status));
+            }
+
+            return payload;
+          }
+
+          function delay(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
+          }
+
+          function persistUploadQueue() {
+            const resumable = uploadQueue
+              .filter((item) => item.status !== 'gotowe' && item.status !== 'anulowano')
+              .map((item) => ({
+                localId: item.localId,
+                uploadId: item.uploadId,
+                filename: item.name,
+                fileSize: item.size,
+                lastModified: item.lastModified,
+                currentPath: item.currentPath,
+                relativePath: item.relativePath,
+                chunkSize: item.chunkSize,
+                uploadedChunks: [...item.uploadedChunks],
+                status: item.status
+              }));
+            localStorage.setItem(uploadResumeStorageKey, JSON.stringify({
+              serverSessionId,
+              items: resumable
+            }));
+          }
+
+          function loadPersistedUploads() {
+            try {
+              const parsed = JSON.parse(localStorage.getItem(uploadResumeStorageKey) || 'null');
+
+              if (!parsed || parsed.serverSessionId !== serverSessionId || !Array.isArray(parsed.items)) {
+                localStorage.removeItem(uploadResumeStorageKey);
+                return [];
+              }
+
+              return parsed.items;
+            } catch {
+              localStorage.removeItem(uploadResumeStorageKey);
+              return [];
+            }
+          }
+
+          function loadPersistedUploadQueue() {
+            uploadQueue = loadPersistedUploads().map((entry) => ({
+              localId: entry.localId,
+              uploadId: entry.uploadId || '',
+              file: null,
+              name: entry.filename || entry.relativePath || 'upload',
+              size: Number(entry.fileSize || 0),
+              lastModified: String(entry.lastModified || ''),
+              currentPath: entry.currentPath || '',
+              relativePath: entry.relativePath || entry.filename || 'upload',
+              chunkSize: Number(entry.chunkSize || uploadChunkSize),
+              totalChunks: Math.ceil(Number(entry.fileSize || 0) / Number(entry.chunkSize || uploadChunkSize)),
+              uploadedChunks: new Set(entry.uploadedChunks || []),
+              status: 'pauza',
+              error: 'Wybierz ten sam plik ponownie, żeby wznowić po odświeżeniu.',
+              bytesUploaded: Math.min((entry.uploadedChunks || []).length * Number(entry.chunkSize || uploadChunkSize), Number(entry.fileSize || 0)),
+              chunkProgressBytes: 0,
+              speedBytes: 0,
+              startedAt: 0,
+              updatedAt: Date.now(),
+              xhr: null
+            }));
+          }
+
+          function removePersistedUpload(localId) {
+            const remaining = loadPersistedUploads().filter((entry) => entry.localId !== localId);
+            localStorage.setItem(uploadResumeStorageKey, JSON.stringify({
+              serverSessionId,
+              items: remaining
+            }));
+          }
+
+          function renderUploadQueue() {
+            uploadQueueList.hidden = uploadQueue.length === 0;
+            uploadQueueList.replaceChildren(...uploadQueue.map(renderUploadQueueItem));
+          }
+
+          function renderUploadQueueItem(item) {
+            const row = document.createElement('div');
+            const sentBytes = Math.min(item.bytesUploaded + item.chunkProgressBytes, item.size);
+            const percent = item.size ? Math.round((sentBytes / item.size) * 100) : 0;
+            row.className = 'upload-queue-item upload-queue-' + uploadStateClass(item.status);
+
+            row.innerHTML =
+              '<span class="upload-queue-name" title="' + escapeHtml(item.relativePath) + '">' + escapeHtml(item.relativePath) + '</span>' +
+              '<span class="upload-queue-percent">' + percent + '%</span>';
+            return row;
+          }
+
+          function uploadStateClass(status) {
+            if (status === 'gotowe') {
+              return 'done';
+            }
+
+            if (status === 'błąd' || status === 'anulowano') {
+              return 'error';
+            }
+
+            if (status === 'pauza') {
+              return 'paused';
+            }
+
+            return 'active';
+          }
+
+          function formatEta(seconds) {
+            if (!Number.isFinite(seconds) || seconds <= 0) {
+              return '-';
+            }
+
+            if (seconds < 60) {
+              return Math.ceil(seconds) + 's';
+            }
+
+            return Math.ceil(seconds / 60) + 'min';
+          }
+
+          function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, (character) => ({
+              '&': '&amp;',
+              '<': '&lt;',
+              '>': '&gt;',
+              '"': '&quot;',
+              "'": '&#39;'
+            }[character]));
           }
 
           function showPathEditor() {
@@ -1402,13 +1856,138 @@ public static class PageRenderer
             pathBreadcrumbs.hidden = false;
           }
 
-          function pathToUrl(value) {
-            const cleaned = value.trim()
+          function pathFromEditorValue(value) {
+            return value.trim()
               .replaceAll('\\\\', '/')
               .replace(/^\/?home\/?/, '')
               .replace(/^\/+|\/+$/g, '');
+          }
 
-            return cleaned ? '/?path=' + encodeURIComponent(cleaned) : '/';
+          function shouldHandleFolderNavigation(event, link) {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target) {
+              return false;
+            }
+
+            const url = new URL(link.href, window.location.href);
+            return url.origin === window.location.origin
+              && url.pathname === '/'
+              && !url.searchParams.has('view')
+              && filesPanel.dataset.view === 'home';
+          }
+
+          function navigateToFolder(path, updateHistory = true) {
+            currentDirectoryPath = normalizeCloudPath(path);
+            currentPath.value = currentDirectoryPath;
+            pathEditorInput.value = currentDirectoryPath ? '/home/' + currentDirectoryPath + '/' : '/home/';
+            pathBreadcrumbs.replaceChildren(...buildPathBreadcrumbNodes(currentDirectoryPath));
+            pathCrumbs = Array.from(pathBreadcrumbs.querySelectorAll('.path-crumb'));
+            setupPathCrumbDropTargets();
+
+            const parentPath = getParentPath(currentDirectoryPath);
+            pathUp.href = currentDirectoryPath ? '/?path=' + encodeURIComponent(parentPath) : '/';
+            workspaceTitle.textContent = currentDirectoryPath ? getDisplayName(currentDirectoryPath) : 'Mój dysk';
+            hidePathEditor();
+            hideContextMenu();
+            clearSelection();
+            applyFileFilter();
+
+            if (updateHistory) {
+              const nextUrl = currentDirectoryPath ? '/?path=' + encodeURIComponent(currentDirectoryPath) : '/';
+              window.history.pushState({ path: currentDirectoryPath }, '', nextUrl);
+            }
+          }
+
+          window.addEventListener('popstate', () => {
+            const params = new URLSearchParams(window.location.search);
+            navigateToFolder(params.get('path') || '', false);
+          });
+
+          function buildPathBreadcrumbNodes(path) {
+            const nodes = [];
+            const home = document.createElement('a');
+            home.className = 'path-crumb' + (path ? '' : ' is-current');
+            home.href = '/';
+            home.dataset.targetPath = '';
+            home.textContent = 'home';
+            if (!path) {
+              home.setAttribute('aria-current', 'page');
+            }
+            nodes.push(home);
+
+            let current = '';
+            normalizeCloudPath(path).split('/').filter(Boolean).forEach((part, index, parts) => {
+              current = current ? current + '/' + part : part;
+              const separator = document.createElement('span');
+              separator.className = 'path-separator';
+              separator.setAttribute('aria-hidden', 'true');
+              separator.textContent = '/';
+
+              const crumb = document.createElement('a');
+              crumb.className = 'path-crumb' + (index === parts.length - 1 ? ' is-current' : '');
+              crumb.href = '/?path=' + encodeURIComponent(current);
+              crumb.dataset.targetPath = current;
+              crumb.textContent = part;
+              if (index === parts.length - 1) {
+                crumb.setAttribute('aria-current', 'page');
+              }
+
+              nodes.push(separator, crumb);
+            });
+
+            return nodes;
+          }
+
+          function setupPathCrumbDropTargets() {
+            pathCrumbs.forEach((crumb) => {
+              crumb.addEventListener('dragover', (event) => {
+                if (!hasMoveDrag(event.dataTransfer)) {
+                  return;
+                }
+
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+                crumb.classList.add('is-drop-target');
+              });
+
+              crumb.addEventListener('dragleave', (event) => {
+                if (!hasMoveDrag(event.dataTransfer)) {
+                  return;
+                }
+
+                crumb.classList.remove('is-drop-target');
+              });
+
+              crumb.addEventListener('drop', async (event) => {
+                if (!hasMoveDrag(event.dataTransfer)) {
+                  return;
+                }
+
+                event.preventDefault();
+                crumb.classList.remove('is-drop-target');
+                await moveDraggedFiles(getDraggedMovePaths(event.dataTransfer), crumb.dataset.targetPath || '');
+              });
+            });
+          }
+
+          function normalizeCloudPath(path) {
+            return String(path || '')
+              .replaceAll('\\\\', '/')
+              .split('/')
+              .map((part) => part.trim())
+              .filter((part) => part && part !== '.' && part !== '..' && !part.includes('..'))
+              .join('/');
+          }
+
+          function getParentPath(path) {
+            const normalized = normalizeCloudPath(path);
+            const index = normalized.lastIndexOf('/');
+            return index < 0 ? '' : normalized.slice(0, index);
+          }
+
+          function getDisplayName(path) {
+            const normalized = normalizeCloudPath(path);
+            const index = normalized.lastIndexOf('/');
+            return index < 0 ? normalized : normalized.slice(index + 1);
           }
 
           function focusSelectedPath(path) {
@@ -1559,6 +2138,11 @@ public static class PageRenderer
             }
 
             const encodedPath = encodeURIComponent(path);
+            if (kind === 'folder' && filesPanel.dataset.view === 'home') {
+              navigateToFolder(path);
+              return;
+            }
+
             window.location.href = kind === 'folder'
               ? '/?path=' + encodedPath
               : '/files/open?path=' + encodedPath;
@@ -1916,7 +2500,7 @@ public static class PageRenderer
               : rows.map((row) => ({ row, element: row }));
 
             targets.forEach(({ row, element }) => {
-              if (!row || row.hidden || !row.dataset.filePath) {
+              if (!row || !element || !row.dataset.filePath || isElementHiddenForSelection(element)) {
                 return;
               }
 
@@ -1956,7 +2540,7 @@ public static class PageRenderer
               return;
             }
 
-            if (event.shiftKey && selectionAnchor) {
+            if (event.shiftKey && selectionAnchor && !selectionAnchor.hidden) {
               selectRange(selectionAnchor, row);
               updateSelectedFiles();
               return;
@@ -1972,15 +2556,18 @@ public static class PageRenderer
           }
 
           function selectRange(fromRow, toRow) {
-            const visibleRows = rows.filter((row) => !row.hidden && row.dataset.filePath);
+            const visibleRows = rows.filter((row) => row.dataset.filePath && isRowVisibleForSelection(row));
             const from = visibleRows.indexOf(fromRow);
             const to = visibleRows.indexOf(toRow);
 
             if (from < 0 || to < 0) {
+              selectionAnchor = toRow;
+              clearSelection();
+              setRowSelected(toRow, true);
               return;
             }
 
-            clearSelection();
+            clearSelection(false);
             const start = Math.min(from, to);
             const end = Math.max(from, to);
 
@@ -1989,8 +2576,11 @@ public static class PageRenderer
             }
           }
 
-          function clearSelection() {
+          function clearSelection(resetAnchor = true) {
             [...selectedPaths].forEach((path) => setRowSelected(rowsByPath.get(path) || null, false));
+            if (resetAnchor) {
+              selectionAnchor = null;
+            }
           }
 
           function updateSelectionStyles() {
@@ -2608,6 +3198,7 @@ public static class PageRenderer
               const name = row.dataset.fileName || '';
               const kind = row.dataset.entryKind || 'file';
               const modifiedSeconds = Number(row.dataset.sortModified || '0');
+              const matchesDirectory = filesPanel.dataset.view !== 'home' || isDirectChildPath(path, currentDirectoryPath);
               const matchesText = !searchQuery
                 || name.includes(searchQuery)
                 || path.toLowerCase().includes(searchQuery);
@@ -2615,7 +3206,7 @@ public static class PageRenderer
               const matchesModified = modifiedFilter === 'all'
                 || (modifiedFilter === 'today' && nowSeconds - modifiedSeconds <= 86400)
                 || (modifiedFilter === 'week' && nowSeconds - modifiedSeconds <= 604800);
-              const visible = matchesText && matchesType && matchesModified;
+              const visible = matchesDirectory && matchesText && matchesType && matchesModified;
               row.hidden = !visible;
 
               const card = cardsByPath.get(path);
@@ -2631,19 +3222,50 @@ public static class PageRenderer
             });
 
             fileCount.textContent = visibleCount + ' element(y)';
+            if (selectionAnchor?.hidden) {
+              selectionAnchor = null;
+            }
             updateSelectionStyles();
+          }
+
+          function isDirectChildPath(path, directoryPath) {
+            const normalizedPath = normalizeCloudPath(path);
+            const normalizedDirectory = normalizeCloudPath(directoryPath);
+            const prefix = normalizedDirectory ? normalizedDirectory + '/' : '';
+
+            if (prefix && !normalizedPath.startsWith(prefix)) {
+              return false;
+            }
+
+            const remaining = prefix ? normalizedPath.slice(prefix.length) : normalizedPath;
+            return remaining.length > 0 && !remaining.includes('/');
           }
 
           function setFileView(mode) {
             fileViewMode = mode === 'grid' ? 'grid' : 'list';
             filesPanel.classList.toggle('is-grid-view', fileViewMode === 'grid');
-            filesTable.style.display = fileViewMode === 'grid' ? 'none' : '';
+            filesTable.hidden = fileViewMode === 'grid';
+            filesGrid.hidden = fileViewMode !== 'grid';
+            filesTable.style.display = fileViewMode === 'grid' ? 'none' : 'table';
             filesGrid.style.display = fileViewMode === 'grid' ? 'grid' : 'none';
             localStorage.setItem('skyvaultFileView', fileViewMode);
             viewButtons.forEach((button) => {
               button.classList.toggle('active', button.dataset.viewMode === fileViewMode);
               button.setAttribute('aria-pressed', String(button.dataset.viewMode === fileViewMode));
             });
+          }
+
+          function isRowVisibleForSelection(row) {
+            if (!row || row.hidden) {
+              return false;
+            }
+
+            const activeElement = fileViewMode === 'grid' ? getCardForRow(row) : row;
+            return Boolean(activeElement && !isElementHiddenForSelection(activeElement));
+          }
+
+          function isElementHiddenForSelection(element) {
+            return element.hidden || element.offsetParent === null || element.getClientRects().length === 0;
           }
 
           function formatBytes(bytes) {
@@ -3388,6 +4010,69 @@ public static class PageRenderer
               width: 0;
               height: 100%;
               background: linear-gradient(90deg, var(--blue), var(--green));
+            }
+
+            .upload-queue-panel {
+              display: block;
+              margin: 0 0 10px;
+              padding: 0;
+              border: 0;
+              border-radius: 0;
+              background: transparent;
+              min-width: 0;
+              overflow: visible;
+            }
+
+            .upload-queue-list {
+              display: grid;
+              gap: 4px;
+              overflow-x: hidden;
+              overflow-y: visible;
+            }
+
+            .upload-queue-item {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 8px;
+              min-height: 24px;
+              padding: 2px 6px;
+              min-width: 0;
+              border: 0;
+              border-radius: 4px;
+              background: rgba(148, 163, 184, 0.10);
+              color: var(--text);
+              font-size: 12px;
+            }
+
+            .upload-queue-name {
+              min-width: 0;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .upload-queue-percent {
+              flex: 0 0 auto;
+              font-variant-numeric: tabular-nums;
+            }
+
+            .upload-queue-active {
+              background: rgba(37, 99, 235, 0.18);
+            }
+
+            .upload-queue-paused {
+              background: rgba(148, 163, 184, 0.18);
+            }
+
+            .upload-queue-done {
+              background: rgba(34, 197, 94, 0.28);
+              color: #dcfce7;
+            }
+
+            .upload-queue-error {
+              background: rgba(239, 68, 68, 0.26);
+              color: #fee2e2;
             }
 
             .nav-list {
@@ -4396,11 +5081,16 @@ public static class PageRenderer
             }
 
             .files-panel.is-grid-view .files-table {
-              display: none;
+              display: none !important;
             }
 
             .files-panel.is-grid-view .files-grid {
               display: grid;
+            }
+
+            .files-table[hidden],
+            .files-grid[hidden] {
+              display: none !important;
             }
 
             .file-card {
