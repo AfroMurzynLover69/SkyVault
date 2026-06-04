@@ -12,6 +12,8 @@ public sealed class CloudWebServer
     private readonly FileStorage fileStorage;
     private readonly EmailSender emailSender;
     private readonly ConcurrentDictionary<string, string> sessions = new();
+    private readonly ConcurrentDictionary<string, DeviceSessionInfo> deviceSessions = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> starredFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PendingRegistration> pendingRegistrations = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PendingPasswordReset> pendingPasswordResets = new(StringComparer.Ordinal);
 
@@ -48,7 +50,8 @@ public sealed class CloudWebServer
                 return;
             }
 
-            HttpResponse response = await HandleRequestAsync(request);
+            string remoteAddress = GetRemoteAddress(client);
+            HttpResponse response = await HandleRequestAsync(request, remoteAddress);
             await response.WriteAsync(stream);
         }
         catch (IOException)
@@ -69,9 +72,15 @@ public sealed class CloudWebServer
         }
     }
 
-    private async Task<HttpResponse> HandleRequestAsync(HttpRequest request)
+    private async Task<HttpResponse> HandleRequestAsync(HttpRequest request, string remoteAddress)
     {
+        string? sessionId = request.GetCookie("cloud_session");
         string? email = GetLoggedInEmail(request);
+
+        if (email is not null && sessionId is not null)
+        {
+            TouchDeviceSession(sessionId, email, request, remoteAddress);
+        }
 
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/assets/logo.png")
         {
@@ -89,7 +98,7 @@ public sealed class CloudWebServer
             string mode = request.Query.GetValueOrDefault("mode", "login");
             string currentDirectory = NormalizeCloudPath(request.Query.GetValueOrDefault("path", ""));
             string view = NormalizeView(request.Query.GetValueOrDefault("view", "home"));
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), mode, currentDirectory: currentDirectory, currentView: view, trashFiles: fileStorage.GetTrashFiles(email)));
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), mode, currentDirectory: currentDirectory, currentView: view, trashFiles: fileStorage.GetTrashFiles(email), deviceSessions: GetDeviceSessions(email), starredPaths: GetStarredPaths(email)));
         }
 
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/forgot-password")
@@ -188,6 +197,7 @@ public sealed class CloudWebServer
             bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
             string newName = request.Form.GetValueOrDefault("newName", "");
             (int moved, int skippedExisting, int missing) = await fileStorage.MoveFilesAsync(email, selectedFiles, destinationDirectory, overwriteExisting, newName);
+            TrackCopiedOrMoved(sessionId, moved);
             string message = BuildMoveMessage(moved, skippedExisting, missing);
 
             if (moved == 0 && skippedExisting > 0)
@@ -208,7 +218,7 @@ public sealed class CloudWebServer
                 AppLog.Warn($"Move skipped missing items for {email}: {missing} item(s)");
             }
 
-            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email)));
 
             if (!overwriteExisting && skippedExisting > 0)
             {
@@ -230,6 +240,7 @@ public sealed class CloudWebServer
             string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
             (int copied, int skippedExisting, int missing) = await fileStorage.CopyFilesAsync(email, selectedFiles, destinationDirectory, overwriteExisting);
+            TrackCopiedOrMoved(sessionId, copied);
             string message = BuildCopyMessage(copied, skippedExisting, missing);
 
             if (copied == 0 && skippedExisting > 0)
@@ -250,7 +261,7 @@ public sealed class CloudWebServer
                 AppLog.Warn($"Copy skipped missing items for {email}: {missing} item(s)");
             }
 
-            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email)));
 
             if (!overwriteExisting && skippedExisting > 0)
             {
@@ -270,6 +281,7 @@ public sealed class CloudWebServer
             IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
             string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             int moved = await fileStorage.MoveToTrashAsync(email, selectedFiles);
+            TrackDeleted(sessionId, moved);
             string message = moved == 0 ? "Select files first." : $"Moved {moved} file(s) to trash.";
 
             if (moved == 0)
@@ -281,7 +293,22 @@ public sealed class CloudWebServer
                 AppLog.Info($"Moved {moved} item(s) to trash for {email}");
             }
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email)));
+        }
+
+        if (request.Method == "POST" && request.Path == "/files/star")
+        {
+            if (email is null)
+            {
+                return Redirect("/");
+            }
+
+            IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
+            int changed = ToggleStarredFiles(email, selectedFiles);
+            string message = changed == 0 ? "Najpierw zaznacz pliki." : $"Zmieniono gwiazdkę dla {changed} element(y).";
+
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email), starredPaths: GetStarredPaths(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/files/trash/restore")
@@ -295,6 +322,7 @@ public sealed class CloudWebServer
             string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             bool overwriteExisting = string.Equals(request.Form.GetValueOrDefault("overwriteExisting", ""), "true", StringComparison.OrdinalIgnoreCase);
             (int restored, int skippedExisting, int missing) = await fileStorage.RestoreFromTrashAsync(email, selectedFiles, overwriteExisting);
+            TrackCopiedOrMoved(sessionId, restored);
             string message = BuildRestoreMessage(restored, skippedExisting, missing);
 
             if (restored == 0 && skippedExisting > 0)
@@ -315,7 +343,7 @@ public sealed class CloudWebServer
                 AppLog.Warn($"Restore skipped missing trash items for {email}: {missing} item(s)");
             }
 
-            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email)));
+            HttpResponse response = Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email), GetDeviceSessions(email)));
 
             if (!overwriteExisting && skippedExisting > 0)
             {
@@ -335,6 +363,7 @@ public sealed class CloudWebServer
             IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
             string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             int deleted = await fileStorage.DeleteFromTrashAsync(email, selectedFiles);
+            TrackDeleted(sessionId, deleted);
             string message = deleted == 0 ? "Select files first." : $"Deleted {deleted} file(s) forever.";
 
             if (deleted == 0)
@@ -346,7 +375,7 @@ public sealed class CloudWebServer
                 AppLog.Info($"Permanently deleted {deleted} item(s) from trash for {email}");
             }
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email)));
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email), GetDeviceSessions(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/files/trash/empty")
@@ -358,6 +387,7 @@ public sealed class CloudWebServer
 
             string currentDirectory = NormalizeCloudPath(request.Form.GetValueOrDefault("currentPath", ""));
             int emptied = await fileStorage.EmptyTrashAsync(email);
+            TrackDeleted(sessionId, emptied);
             string message = emptied == 0 ? "Trash is already empty." : "Trash emptied.";
 
             if (emptied == 0)
@@ -369,7 +399,7 @@ public sealed class CloudWebServer
                 AppLog.Info($"Emptied trash for {email}");
             }
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email)));
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, "trash", fileStorage.GetTrashFiles(email), GetDeviceSessions(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/forgot-password")
@@ -503,8 +533,8 @@ public sealed class CloudWebServer
 
             pendingRegistrations.TryRemove(verifyEmail, out _);
             fileStorage.CreateUserDirectory(pending.Email);
-            string sessionId = CreateSession(pending.Email);
-            return Redirect("/", sessionId);
+            string newSessionId = CreateSession(pending.Email, request, remoteAddress);
+            return Redirect("/", newSessionId);
         }
 
         if (request.Method == "POST" && request.Path == "/login")
@@ -514,8 +544,8 @@ public sealed class CloudWebServer
 
             if (userStore.ValidateLogin(login, password))
             {
-                string sessionId = CreateSession(login);
-                return Redirect("/", sessionId);
+                string newSessionId = CreateSession(login, request, remoteAddress);
+                return Redirect("/", newSessionId);
             }
 
             AppLog.Warn($"Failed login attempt for {login}");
@@ -586,7 +616,8 @@ public sealed class CloudWebServer
                 clientFileCount,
                 clientCollectedCount);
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            TrackUploaded(sessionId, uploaded);
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/files/create")
@@ -606,7 +637,8 @@ public sealed class CloudWebServer
                 AppLog.Warn($"Create file failed for {fileName}: {message}");
             }
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            TrackUploaded(sessionId, result == FileCreateResult.Created ? 1 : 0);
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/folders/create")
@@ -626,16 +658,17 @@ public sealed class CloudWebServer
                 AppLog.Warn($"Create folder failed for {folderName}: {message}");
             }
 
-            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory));
+            TrackUploaded(sessionId, result == FileCreateResult.Created ? 1 : 0);
+            return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), "login", message, currentDirectory, deviceSessions: GetDeviceSessions(email)));
         }
 
         if (request.Method == "POST" && request.Path == "/logout")
         {
-            string? sessionId = request.GetCookie("cloud_session");
+            string? logoutSessionId = request.GetCookie("cloud_session");
 
-            if (sessionId is not null)
+            if (logoutSessionId is not null)
             {
-                sessions.TryRemove(sessionId, out _);
+                sessions.TryRemove(logoutSessionId, out _);
             }
 
             HttpResponse response = Redirect("/");
@@ -657,11 +690,148 @@ public sealed class CloudWebServer
         return sessionId is not null && sessions.TryGetValue(sessionId, out string? email) ? email : null;
     }
 
-    private string CreateSession(string email)
+    private string CreateSession(string email, HttpRequest request, string remoteAddress)
     {
         string sessionId = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         sessions[sessionId] = email;
+        TouchDeviceSession(sessionId, email, request, remoteAddress, isNew: true);
         return sessionId;
+    }
+
+    private void TouchDeviceSession(string sessionId, string email, HttpRequest request, string remoteAddress, bool isNew = false)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        string userAgent = request.Headers.GetValueOrDefault("User-Agent", "");
+        (string deviceName, string systemName) = DescribeDevice(userAgent);
+
+        deviceSessions.AddOrUpdate(
+            sessionId,
+            _ => new DeviceSessionInfo
+            {
+                SessionId = sessionId,
+                Email = email,
+                IpAddress = remoteAddress,
+                DeviceName = deviceName,
+                SystemName = systemName,
+                StartedAt = now,
+                LastSeenAt = now
+            },
+            (_, existing) =>
+            {
+                existing.IpAddress = remoteAddress;
+                existing.DeviceName = deviceName;
+                existing.SystemName = systemName;
+                existing.LastSeenAt = isNew ? existing.StartedAt : now;
+                return existing;
+            });
+    }
+
+    private IReadOnlyList<DeviceSessionInfo> GetDeviceSessions(string? email)
+    {
+        if (email is null)
+        {
+            return [];
+        }
+
+        return deviceSessions.Values
+            .Where(session => string.Equals(session.Email, email, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(session => session.LastSeenAt)
+            .ToList();
+    }
+
+    private IReadOnlySet<string> GetStarredPaths(string? email)
+    {
+        if (email is null || !starredFiles.TryGetValue(email, out ConcurrentDictionary<string, byte>? paths))
+        {
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        return paths.Keys.ToHashSet(StringComparer.Ordinal);
+    }
+
+    private int ToggleStarredFiles(string email, IReadOnlyList<string> paths)
+    {
+        ConcurrentDictionary<string, byte> userStars = starredFiles.GetOrAdd(email, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
+        int changed = 0;
+
+        foreach (string rawPath in paths)
+        {
+            string path = NormalizeCloudPath(rawPath);
+
+            if (path.Length == 0)
+            {
+                continue;
+            }
+
+            if (!userStars.TryRemove(path, out _))
+            {
+                userStars[path] = 1;
+            }
+
+            changed += 1;
+        }
+
+        return changed;
+    }
+
+    private void TrackUploaded(string? sessionId, int count)
+    {
+        if (count > 0 && sessionId is not null && deviceSessions.TryGetValue(sessionId, out DeviceSessionInfo? session))
+        {
+            session.UploadedFiles += count;
+        }
+    }
+
+    private void TrackDeleted(string? sessionId, int count)
+    {
+        if (count > 0 && sessionId is not null && deviceSessions.TryGetValue(sessionId, out DeviceSessionInfo? session))
+        {
+            session.DeletedFiles += count;
+        }
+    }
+
+    private void TrackCopiedOrMoved(string? sessionId, int count)
+    {
+        if (count > 0 && sessionId is not null && deviceSessions.TryGetValue(sessionId, out DeviceSessionInfo? session))
+        {
+            session.CopiedOrMovedFiles += count;
+        }
+    }
+
+    private static string GetRemoteAddress(TcpClient client)
+    {
+        return client.Client.RemoteEndPoint is IPEndPoint endpoint
+            ? endpoint.Address.ToString()
+            : "unknown";
+    }
+
+    private static (string DeviceName, string SystemName) DescribeDevice(string userAgent)
+    {
+        string lower = userAgent.ToLowerInvariant();
+        string system = lower switch
+        {
+            _ when lower.Contains("android", StringComparison.Ordinal) => "Android",
+            _ when lower.Contains("iphone", StringComparison.Ordinal) || lower.Contains("ipad", StringComparison.Ordinal) => "iOS",
+            _ when lower.Contains("linux", StringComparison.Ordinal) => "Linux",
+            _ when lower.Contains("windows", StringComparison.Ordinal) => "Windows",
+            _ when lower.Contains("mac os", StringComparison.Ordinal) => "macOS",
+            _ => "Nieznany system"
+        };
+        string browser = lower switch
+        {
+            _ when lower.Contains("edg/", StringComparison.Ordinal) => "Edge",
+            _ when lower.Contains("firefox/", StringComparison.Ordinal) => "Firefox",
+            _ when lower.Contains("chrome/", StringComparison.Ordinal) => "Chrome",
+            _ when lower.Contains("safari/", StringComparison.Ordinal) => "Safari",
+            _ => "Przeglądarka"
+        };
+        string device = lower.Contains("mobile", StringComparison.Ordinal)
+            || lower.Contains("android", StringComparison.Ordinal)
+            || lower.Contains("iphone", StringComparison.Ordinal)
+                ? "Telefon"
+                : "Komputer";
+
+        return ($"{device} {system}", $"{system} / {browser}");
     }
 
     private static string NormalizeEmail(string email)
@@ -851,7 +1021,7 @@ public sealed class CloudWebServer
     {
         return view.Trim().ToLowerInvariant() switch
         {
-            "recent" or "videos" or "images" or "music" or "documents" or "trash" => view.Trim().ToLowerInvariant(),
+            "recent" or "videos" or "images" or "music" or "documents" or "trash" or "computers" or "shared" or "starred" => view.Trim().ToLowerInvariant(),
             _ => "home"
         };
     }
