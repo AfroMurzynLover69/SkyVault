@@ -1,0 +1,91 @@
+<div class="file-browser-surface" (mousedown)="onSurfaceMouseDown($event)" (contextmenu)="onSurfaceContextMenu($event)">
+  @if (viewMode === 'grid') {
+    <div class="files-grid" id="filesGrid">
+      @for (file of files; track file.name) {
+        <div
+          class="file-card"
+          draggable="true"
+          [class.is-selected]="isSelected(file.name)"
+          [attr.data-file-path]="file.name"
+          [attr.data-file-name]="file.name.toLowerCase()"
+          [attr.data-entry-kind]="entryKind(file)"
+          [attr.data-sort-name]="file.name.toLowerCase()"
+          [attr.data-sort-size]="file.sizeBytes"
+          [attr.data-sort-modified]="sortModified(file)"
+          (click)="onItemClick($event, file.name)"
+          (dblclick)="allowOpen && open.emit(file)"
+          (contextmenu)="onContextMenu($event, file)"
+          (dragstart)="onDragStart($event, file)"
+          (dragover)="onDragOverFolder($event, file)"
+          (drop)="onDropOnFolder($event, file)"
+        >
+          <div class="file-card-preview">
+            <img [class]="file.isFolder ? 'folder-icon-img grid-folder-icon' : 'file-icon-img grid-file-icon'" [src]="iconFor(file)" alt="">
+          </div>
+          <div class="file-card-body">
+            @if (allowOpen) {
+              <button class="file-card-link file-link-button" type="button" [attr.data-file-path]="file.name" [attr.data-entry-kind]="entryKind(file)" [title]="displayName(file.name)" (click)="$event.stopPropagation(); open.emit(file)">{{ displayName(file.name) }}</button>
+            } @else {
+              <span class="file-card-link" [title]="displayName(file.name)">{{ displayName(file.name) }}</span>
+            }
+            <span class="file-card-meta">{{ file.isFolder ? 'Folder' : formatBytes(file.sizeBytes) }} · {{ file.modifiedAt | date:'short' }}</span>
+          </div>
+        </div>
+      } @empty {
+        <p class="empty-grid">Brak plików.</p>
+      }
+    </div>
+  } @else {
+    <table class="files-table" id="filesTable">
+      <thead>
+        <tr>
+          <th>Nazwa</th>
+          <th>Właściciel</th>
+          <th>Data modyfikacji</th>
+          <th>Rozmiar pliku</th>
+        </tr>
+      </thead>
+      <tbody id="fileRows">
+        @for (file of files; track file.name) {
+          <tr
+            draggable="true"
+            [class.is-selected]="isSelected(file.name)"
+            [attr.data-file-path]="file.name"
+            [attr.data-file-name]="file.name.toLowerCase()"
+            [attr.data-entry-kind]="entryKind(file)"
+            [attr.data-sort-name]="file.name.toLowerCase()"
+            [attr.data-sort-size]="file.sizeBytes"
+            [attr.data-sort-modified]="sortModified(file)"
+            (click)="onItemClick($event, file.name)"
+            (dblclick)="allowOpen && open.emit(file)"
+            (contextmenu)="onContextMenu($event, file)"
+            (dragstart)="onDragStart($event, file)"
+            (dragover)="onDragOverFolder($event, file)"
+            (drop)="onDropOnFolder($event, file)"
+          >
+            <td>
+              <span class="file-name">
+                <img [class]="file.isFolder ? 'folder-icon-img row-folder-icon' : 'file-icon-img row-file-icon'" [src]="iconFor(file)" alt="">
+                <span>
+                  @if (allowOpen) {
+                    <button class="file-link-button" type="button" [attr.data-file-path]="file.name" [attr.data-entry-kind]="entryKind(file)" [title]="displayName(file.name)" (click)="$event.stopPropagation(); open.emit(file)">{{ displayName(file.name) }}</button>
+                  } @else {
+                    <span [title]="displayName(file.name)">{{ displayName(file.name) }}</span>
+                  }
+                </span>
+              </span>
+            </td>
+            <td><span class="owner-chip"><span class="owner-avatar">ja</span><span>ja</span></span></td>
+            <td>{{ file.modifiedAt | date:'short' }}</td>
+            <td>{{ file.isFolder ? '-' : formatBytes(file.sizeBytes) }}</td>
+          </tr>
+        } @empty {
+          <tr class="empty-row"><td colspan="4">Brak plików.</td></tr>
+        }
+      </tbody>
+    </table>
+  }
+  @if (selectionBox) {
+    <div class="selection-box" [style.left.px]="selectionBox.left" [style.top.px]="selectionBox.top" [style.width.px]="selectionBox.width" [style.height.px]="selectionBox.height"></div>
+  }
+</div>

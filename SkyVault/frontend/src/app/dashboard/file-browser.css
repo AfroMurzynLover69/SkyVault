@@ -1,0 +1,22 @@
+.file-browser-surface {
+  min-height: 220px;
+  flex-grow: 1;
+}
+
+.files-table {
+  display: table;
+}
+
+.files-grid {
+  display: grid;
+}
+
+.file-link-button {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}

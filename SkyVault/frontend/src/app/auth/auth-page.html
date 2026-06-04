@@ -1,0 +1,44 @@
+<main class="auth-page">
+  <section class="auth-brand" aria-label="SkyVault authentication">
+    <div class="brand-lockup">
+      <img class="brand-logo" src="/assets/icons/logo.png" alt="SkyVault">
+    </div>
+    <h1>{{ verifying() ? 'Verify your mailbox.' : 'Welcome back.' }}</h1>
+    <p>Encrypted Linux-style file workspace for your private SkyVault.</p>
+
+    @if (!verifying()) {
+      <div class="auth-mode-switch" aria-label="Authentication mode">
+        <button type="button" [class.active]="mode() === 'login'" (click)="switchMode('login')">Login</button>
+        <button type="button" [class.active]="mode() === 'register'" (click)="switchMode('register')">Register</button>
+      </div>
+    }
+
+    <form class="auth-card" (ngSubmit)="submit()">
+      <h2>{{ verifying() ? 'Email verification' : title() }}</h2>
+
+      @if (message()) {
+        <p class="alert">{{ message() }}</p>
+      }
+
+      @if (verifying()) {
+        <p class="auth-note">Enter the code sent to {{ verificationEmail() }}.</p>
+        <label for="code">Verification code</label>
+        <input id="code" name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="6" [ngModel]="verificationCode()" (ngModelChange)="verificationCode.set($event)">
+        <div class="auth-actions">
+          <button type="submit" [disabled]="busy()">{{ busy() ? 'Verifying...' : 'Verify' }}</button>
+          <button class="secondary" type="button" (click)="switchMode('register')">Back</button>
+        </div>
+      } @else {
+        <label for="email">{{ mode() === 'register' ? 'Account email' : 'Account ID' }}</label>
+        <input id="email" name="email" type="email" autocomplete="email" required maxlength="254" [ngModel]="email()" (ngModelChange)="email.set($event)">
+
+        <label for="password">Master password</label>
+        <input id="password" name="password" type="password" [autocomplete]="mode() === 'register' ? 'new-password' : 'current-password'" required minlength="4" [ngModel]="password()" (ngModelChange)="password.set($event)">
+
+        <div class="auth-actions">
+          <button type="submit" [disabled]="busy()">{{ buttonLabel() }}</button>
+        </div>
+      }
+    </form>
+  </section>
+</main>

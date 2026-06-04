@@ -1,0 +1,354 @@
+<section class="app-shell">
+  <header class="drive-topbar">
+    <a class="drive-brand" href="/" (click)="navigate('home', '', $event)">
+      <img class="drive-brand-logo" src="/assets/icons/logo.png" alt="SkyVault">
+      <span>SkyVault</span>
+    </a>
+    <div class="drive-top-actions" aria-label="Narzędzia">
+      <button class="drive-icon-button" type="button" aria-label="Pomoc" (click)="showAboutPanel.set(true)"><img class="ui-icon-img" src="/assets/icons/ui-help.svg" alt=""></button>
+      <button class="drive-icon-button" type="button" aria-label="Ustawienia" (click)="toggleSettingsPanel()"><img class="ui-icon-img" src="/assets/icons/ui-settings.svg" alt=""></button>
+      <button class="drive-avatar-button" type="button" aria-label="Konto" (click)="toggleAccountPanel()">{{ accountInitial() }}</button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <form class="upload-panel compact-upload">
+      <input name="file" id="fileInput" type="file" multiple (change)="uploadFiles($any($event.target).files)">
+      <input name="folder" id="folderInput" type="file" webkitdirectory directory multiple (change)="uploadFiles($any($event.target).files)">
+      <input name="currentPath" id="currentPath" type="hidden" [value]="currentPath()">
+    </form>
+
+    <nav class="nav-list" aria-label="SkyVault sections">
+      <p class="places-heading">Dysk</p>
+      <a class="nav-item" [class.active]="currentView() === 'home' && !currentPath()" href="/" (click)="navigate('home', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/user-home.svg" alt="">
+        <span>Strona główna</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'home'" href="/" (click)="navigate('home', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/folder.svg" alt="">
+        <span>Mój dysk</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'computers'" href="/?view=computers" (click)="navigate('computers', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/network-workgroup.svg" alt="">
+        <span>Komputery</span>
+      </a>
+      <p class="places-heading">Biblioteka</p>
+      <a class="nav-item" [class.active]="currentView() === 'documents'" href="/?view=documents" (click)="navigate('documents', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/folder-documents.svg" alt="">
+        <span>Dokumenty</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'images'" href="/?view=images" (click)="navigate('images', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/folder-pictures.svg" alt="">
+        <span>Obrazy</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'videos'" href="/?view=videos" (click)="navigate('videos', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/folder-videos.svg" alt="">
+        <span>Filmy</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'music'" href="/?view=music" (click)="navigate('music', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/folder-music.svg" alt="">
+        <span>Muzyka</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'recent'" href="/?view=recent" (click)="navigate('recent', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/document-open-recent.svg" alt="">
+        <span>Ostatnie</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'starred'" href="/?view=starred" (click)="navigate('starred', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/ui-star.svg" alt="">
+        <span>Oznaczone gwiazdką</span>
+      </a>
+      <a class="nav-item" [class.active]="currentView() === 'trash'" href="/?view=trash" (click)="navigate('trash', '', $event)">
+        <img class="nav-icon-img" src="/assets/icons/user-trash.svg" alt="">
+        <span>Kosz</span>
+      </a>
+    </nav>
+
+    <div class="storage-summary">
+      <div class="upload-queue-list" id="uploadQueueList" hidden aria-label="Kolejka uploadów"></div>
+      <a class="drive-row drive-storage-link" href="/storage">
+        <img class="nav-icon-img" src="/assets/icons/media-flash-sd-mmc.svg" alt="">
+        <span>Skydysk</span>
+        <img class="drive-eject-icon" src="/assets/icons/media-eject.svg" alt="">
+      </a>
+      <div class="meter">
+        <span [style.width.%]="usedPercent()"></span>
+      </div>
+      <p>{{ formatBytes(account.usedBytes) }} z {{ formatBytes(account.quotaBytes) }}</p>
+    </div>
+  </aside>
+
+  <main class="workspace">
+    <header class="workspace-top">
+      <div class="workspace-title">
+        <h1>{{ workspaceTitle() }}</h1>
+        <img class="title-caret-img" src="/assets/icons/ui-caret-down.svg" alt="">
+      </div>
+      <div class="account-menu" id="accountPanel" [hidden]="!showAccountPanel()">
+        <span class="account-email">{{ account.username }}</span>
+        <span class="avatar">{{ accountInitial() }}</span>
+        <div class="account-subscription">
+          <span>Subskrypcja</span>
+          <strong>Plan lokalny - {{ formatBytes(account.quotaBytes) }}</strong>
+        </div>
+        <button class="secondary" type="button" (click)="logoutRequested.emit()">Wyloguj się</button>
+      </div>
+    </header>
+
+    <section class="settings-panel" id="settingsPanel" [hidden]="!showSettingsPanel()" aria-label="Ustawienia">
+      <h2>Ustawienia</h2>
+      <div class="settings-grid">
+        <section>
+          <h3>Miejsce na dane</h3>
+          <div class="meter"><span [style.width.%]="usedPercent()"></span></div>
+          <p>wykorzystano {{ formatBytes(account.usedBytes) }} z {{ formatBytes(account.quotaBytes) }}</p>
+        </section>
+      </div>
+    </section>
+
+    <div class="location-row">
+      <div class="drive-search">
+        <img class="search-icon-img" src="/assets/icons/ui-search.svg" alt="">
+        <input id="globalSearchInput" type="search" autocomplete="off" placeholder="Szukaj na SkyVault" [value]="searchQuery()" (input)="searchQuery.set($any($event.target).value)">
+        <button class="drive-search-tune" type="button" aria-label="Opcje wyszukiwania">
+          <img class="ui-icon-img" src="/assets/icons/ui-tune.svg" alt="">
+        </button>
+      </div>
+      <div class="path-bar" aria-label="Current cloud path" (dblclick)="beginPathEdit()">
+        <a
+          class="path-up"
+          [class.is-drop-target]="pathDropTarget() === parentDirectory()"
+          href="/"
+          (click)="navigate('home', parentDirectory(), $event)"
+          (dragover)="onPathDragOver($event, parentDirectory())"
+          (dragleave)="onPathDragLeave($event, parentDirectory())"
+          (drop)="onPathDrop($event, parentDirectory())"
+          aria-label="Parent folder"
+        >..</a>
+        <img class="path-folder-icon" src="/assets/icons/folder.svg" alt="" aria-hidden="true">
+        <div class="path-breadcrumbs" id="pathBreadcrumbs" [hidden]="showPathEditor()">
+          @for (crumb of breadcrumbs(); track crumb.path) {
+            @if (!$first) {
+              <span class="path-separator">/</span>
+            }
+            <a
+              class="path-crumb"
+              [class.is-current]="$last"
+              [class.is-drop-target]="pathDropTarget() === crumb.path"
+              [href]="crumb.path ? '/?path=' + crumb.path : '/'"
+              (click)="navigate('home', crumb.path, $event)"
+              (dragover)="onPathDragOver($event, crumb.path)"
+              (dragleave)="onPathDragLeave($event, crumb.path)"
+              (drop)="onPathDrop($event, crumb.path)"
+            >{{ crumb.label }}</a>
+          }
+        </div>
+        <form class="path-editor" id="pathEditor" [hidden]="!showPathEditor()" (submit)="$event.preventDefault(); commitPathEdit()">
+          <input id="pathEditorInput" name="path" [value]="editedPath()" autocomplete="off" (input)="editedPath.set($any($event.target).value)">
+          <button class="path-editor-button" type="button" data-editor-action="clear" aria-label="Clear path" (click)="clearPathEdit()"></button>
+          <button class="path-editor-button" type="button" data-editor-action="menu" aria-label="Show path menu" (click)="showPathEditor.set(false)"></button>
+          <button class="path-editor-button" type="submit" aria-label="Open path"></button>
+        </form>
+      </div>
+    </div>
+
+    <section
+      class="files-panel"
+      id="filesPanel"
+      [attr.data-view]="currentView()"
+      [class.is-grid-view]="fileViewMode() === 'grid'"
+      [class.is-dragging]="isDraggingFiles()"
+      (dragover)="onDragOver($event)"
+      (dragleave)="onDragLeave($event)"
+      (drop)="onDrop($event)"
+    >
+      <div class="drive-filters" aria-label="Filtry">
+        <label>
+          <span>Typ elementu</span>
+          <select id="typeFilterSelect" [value]="typeFilter()" (change)="typeFilter.set($any($event.target).value)">
+            <option value="all">Wszystkie</option>
+            <option value="folder">Foldery</option>
+            <option value="file">Pliki</option>
+          </select>
+        </label>
+        <label>
+          <span>Sortuj</span>
+          <select id="modifiedSortSelect" [value]="sortMode()" (change)="sortMode.set($any($event.target).value)">
+            <option value="modified-desc">Data: najnowsze</option>
+            <option value="modified-asc">Data: najstarsze</option>
+            <option value="name-asc">Nazwa: A-Z</option>
+            <option value="name-desc">Nazwa: Z-A</option>
+            <option value="size-desc">Rozmiar: największe</option>
+            <option value="size-asc">Rozmiar: najmniejsze</option>
+          </select>
+        </label>
+      </div>
+      <div class="section-head">
+        <div class="file-actions">
+          <span id="fileCount">{{ visibleFiles().length }} element(y)</span>
+          <div class="file-actions-right">
+            <div class="file-search" id="fileSearchBox" [hidden]="!showFileSearch()">
+              <input id="fileSearchInput" type="search" autocomplete="off" placeholder="Szukaj" [value]="searchQuery()" (input)="searchQuery.set($any($event.target).value)">
+            </div>
+            <button class="tool-button search-toggle" id="fileSearchToggle" type="button" aria-label="Szukaj" [attr.aria-expanded]="showFileSearch()" (click)="toggleFileSearch()">
+              <img class="ui-icon-img" src="/assets/icons/ui-search.svg" alt="">
+            </button>
+            <div class="view-switch" aria-label="File view">
+              <button class="view-button" [class.active]="fileViewMode() === 'list'" type="button" data-view-mode="list" aria-label="List view" (click)="toggleViewMode('list')">
+                <img class="ui-icon-img" src="/assets/icons/ui-view-list.svg" alt="">
+              </button>
+              <button class="view-button" [class.active]="fileViewMode() === 'grid'" type="button" data-view-mode="grid" aria-label="Icon view" (click)="toggleViewMode('grid')">
+                <img class="ui-icon-img" src="/assets/icons/ui-view-grid.svg" alt="">
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      @if (currentView() === 'computers') {
+        <section class="device-session-panel" aria-label="Historia urządzeń">
+          <div class="device-session-head">
+            <span>Urządzenie</span>
+            <span>IP</span>
+            <span>Ostatnie wejście</span>
+            <span>Czas</span>
+            <span>Operacje</span>
+          </div>
+          <div class="device-session-list">
+            @for (session of deviceSessions; track session.sessionId) {
+              <article class="device-session-card">
+                <div class="device-identity">
+                  <img src="/assets/icons/network-workgroup.svg" alt="">
+                  <div><strong>{{ session.deviceName }}</strong><span>{{ session.systemName }}</span></div>
+                </div>
+                <span>{{ session.ipAddress }}</span>
+                <span>{{ session.lastSeenAt | date:'short' }}</span>
+                <span>{{ session.durationSeconds }}s</span>
+                <div class="device-ops"><span class="op-chip upload-op">{{ session.uploadedFiles }} upload</span><span class="op-chip">{{ session.deletedFiles }} delete</span></div>
+              </article>
+            } @empty {
+              <p class="device-empty">Brak aktywnych sesji urządzeń.</p>
+            }
+          </div>
+        </section>
+      } @else {
+        <app-file-browser
+          [files]="visibleFiles()"
+          [selectedPaths]="selectedPaths()"
+          [allowOpen]="currentView() !== 'trash'"
+          [viewMode]="fileViewMode()"
+          (open)="openItem($event)"
+          (toggleSelect)="toggleSelect($event)"
+          (selectionChange)="selectedPaths.set($event)"
+          (contextMenu)="openContextMenu($event)"
+          (moveToFolder)="movePathsToFolder($event.paths, $event.targetPath)"
+        />
+      }
+    </section>
+  </main>
+</section>
+
+<aside class="upload-progress-toast" [hidden]="!message()" aria-live="polite">
+  <div class="upload-progress-head">
+    <strong>Upload</strong>
+    <span>{{ uploadProgress() }}%</span>
+  </div>
+  <div class="progress">
+    <span [style.width.%]="uploadProgress()"></span>
+  </div>
+  <p>{{ message() }}</p>
+</aside>
+
+<div
+  class="context-menu"
+  [hidden]="!showContextMenu()"
+  [style.left.px]="contextMenuX()"
+  [style.top.px]="contextMenuY()"
+  [attr.data-context]="contextTarget() ? 'item' : 'blank'"
+  (click)="$event.stopPropagation()"
+>
+  @if (currentView() === 'trash') {
+    @if (contextTarget()) {
+      <button type="button" data-action="restore-trash" (click)="runContextAction('restore')">Przywróć</button>
+      <button type="button" data-action="delete-forever" (click)="runContextAction('delete')">Usuń na zawsze</button>
+      <button type="button" (click)="runContextAction('info')">Informacje</button>
+    } @else {
+      <button type="button" (click)="runContextAction('empty-trash')">Opróżnij kosz</button>
+    }
+  } @else {
+    @if (contextTarget()) {
+      <button type="button" (click)="runContextAction('open')">Otwórz</button>
+      <button type="button" (click)="runContextAction('download')">Pobierz</button>
+      <button type="button" (click)="runContextAction('zip')">Pobierz ZIP</button>
+      <button type="button" (click)="runContextAction('rename')">Zmień nazwę</button>
+      <button type="button" (click)="runContextAction('move')">Przenieś</button>
+      <button type="button" (click)="runContextAction('copy')">Kopiuj</button>
+      <button type="button" data-action="move-trash" (click)="runContextAction('trash')">Przenieś do kosza</button>
+      <button type="button" (click)="runContextAction('star')">Oznacz gwiazdką</button>
+      <button type="button" (click)="runContextAction('info')">Informacje</button>
+    } @else {
+      <button type="button" (click)="runContextAction('new-folder')">Nowy folder</button>
+      <button type="button" (click)="runContextAction('upload-files')">Prześlij pliki</button>
+      <button type="button" (click)="runContextAction('upload-folder')">Prześlij folder</button>
+    }
+  }
+</div>
+
+<div class="ui-confirm" id="uiAbout" [hidden]="!showAboutPanel()">
+  <div class="ui-confirm-panel about-panel" role="dialog" aria-modal="true" aria-labelledby="uiAboutTitle">
+    <img class="about-logo" src="/assets/icons/logo.png" alt="SkyVault">
+    <p id="uiAboutTitle">SkyVault</p>
+    <dl class="file-info-list">
+      <dt>Typ</dt>
+      <dd>Prywatna chmura plików</dd>
+    </dl>
+    <div class="ui-confirm-actions">
+      <button type="button" class="primary" (click)="showAboutPanel.set(false)">OK</button>
+    </div>
+  </div>
+</div>
+
+<div class="ui-confirm" [hidden]="!showInfoPanel()" (click)="showInfoPanel.set(false)">
+  <div class="ui-confirm-panel file-info-panel" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+    <p>Informacje o pliku</p>
+    @if (infoItem(); as item) {
+      <dl class="file-info-list">
+        <dt>Nazwa</dt>
+        <dd>{{ displayName(item.name) }}</dd>
+        <dt>Typ</dt>
+        <dd>{{ item.isFolder ? 'Folder' : 'Plik' }}</dd>
+        <dt>Rozmiar</dt>
+        <dd>{{ item.isFolder ? '-' : formatBytes(item.sizeBytes) }}</dd>
+        <dt>Modyfikacja</dt>
+        <dd>{{ item.modifiedAt | date:'short' }}</dd>
+        <dt>Path hash</dt>
+        <dd>{{ item.pathHash || '-' }}</dd>
+      </dl>
+    }
+    <div class="ui-confirm-actions">
+      <button type="button" class="primary" (click)="showInfoPanel.set(false)">OK</button>
+    </div>
+  </div>
+</div>
+
+@if (customModal(); as modal) {
+  <div class="ui-confirm" (click)="onModalCancel()">
+    <form class="ui-confirm-panel" role="dialog" aria-modal="true" (click)="$event.stopPropagation()" (submit)="onModalSubmit($event)">
+      <p>{{ modal.message }}</p>
+      @if (modal.type === 'prompt') {
+        <input
+          id="customModalInput"
+          type="text"
+          [value]="modalInputValue()"
+          (input)="modalInputValue.set($any($event.target).value)"
+          [placeholder]="modal.placeholder"
+          autofocus
+          autocomplete="off"
+        >
+      }
+      <div class="ui-confirm-actions">
+        <button type="button" (click)="onModalCancel()">Anuluj</button>
+        <button type="submit" class="primary">OK</button>
+      </div>
+    </form>
+  </div>
+}

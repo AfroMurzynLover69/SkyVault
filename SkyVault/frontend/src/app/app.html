@@ -1,0 +1,23 @@
+@if (loading()) {
+  <main class="auth-page">
+    <section class="auth-brand">
+      <div class="brand-lockup">
+        <img class="brand-logo" src="/assets/icons/logo.png" alt="SkyVault">
+      </div>
+      <h1>SkyVault</h1>
+      <p>Loading...</p>
+    </section>
+  </main>
+} @else if (!authenticated() || !account()) {
+  <app-auth-page (authenticated)="refreshState()" />
+} @else {
+  <app-dashboard-page
+    [account]="account()!"
+    [files]="files()"
+    [trashFiles]="trashFiles()"
+    [deviceSessions]="deviceSessions()"
+    [starredPaths]="starredPaths()"
+    (refreshRequested)="refreshState()"
+    (logoutRequested)="logout()"
+  />
+}

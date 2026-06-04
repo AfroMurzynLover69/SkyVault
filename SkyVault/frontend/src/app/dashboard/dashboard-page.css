@@ -1,0 +1,32 @@
+:host {
+  display: block;
+}
+
+.ui-icon-img,
+.search-icon-img,
+.title-caret-img {
+  display: block;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.drive-icon-button .ui-icon-img,
+.drive-search-tune .ui-icon-img,
+.tool-button .ui-icon-img,
+.view-button .ui-icon-img {
+  width: 18px;
+  height: 18px;
+}
+
+.search-icon-img {
+  width: 16px;
+  height: 16px;
+}
+
+.title-caret-img {
+  width: 14px;
+  height: 14px;
+  opacity: 0.86;
+}
