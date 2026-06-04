@@ -101,6 +101,18 @@ public sealed class CloudWebServer
             return Html(PageRenderer.RenderHome(email, GetUser(email), fileStorage.GetFiles(email), mode, currentDirectory: currentDirectory, currentView: view, trashFiles: fileStorage.GetTrashFiles(email), deviceSessions: GetDeviceSessions(email), starredPaths: GetStarredPaths(email)));
         }
 
+        if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/storage")
+        {
+            UserAccount? account = GetUser(email);
+
+            if (account is null)
+            {
+                return Redirect("/");
+            }
+
+            return Html(PageRenderer.RenderStorage(account, fileStorage.GetFiles(email)));
+        }
+
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/forgot-password")
         {
             return Html(PageRenderer.RenderForgotPassword());

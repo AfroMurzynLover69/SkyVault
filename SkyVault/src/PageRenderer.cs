@@ -23,6 +23,55 @@ public static class PageRenderer
         return Layout(content);
     }
 
+    public static string RenderStorage(UserAccount account, IReadOnlyList<FileEntry> files)
+    {
+        double usedPercent = account.QuotaBytes == 0 ? 0 : account.UsedBytes * 100.0 / account.QuotaBytes;
+        usedPercent = Math.Clamp(usedPercent, 0, 100);
+        string usedPercentText = usedPercent.ToString("0.##", CultureInfo.InvariantCulture);
+        int fileCount = files.Count(file => !file.IsFolder);
+        int folderCount = files.Count(file => file.IsFolder);
+        long largestFileBytes = files.Where(file => !file.IsFolder).Select(file => file.SizeBytes).DefaultIfEmpty(0).Max();
+
+        return Layout($$"""
+        <section class="storage-page">
+          <header class="storage-header">
+            <a class="button secondary" href="/">Powrót</a>
+            <div>
+              <p class="eyebrow">Skydysk</p>
+              <h1>Analiza zajętości dysku</h1>
+            </div>
+          </header>
+          <section class="storage-overview" aria-label="Zajętość dysku">
+            <div class="storage-main-stat">
+              <span>{{FormatBytes(account.UsedBytes)}} z {{FormatBytes(account.QuotaBytes)}}</span>
+              <strong>{{usedPercentText}}%</strong>
+            </div>
+            <div class="meter storage-meter">
+              <span style="width: {{usedPercentText}}%"></span>
+            </div>
+          </section>
+          <section class="storage-stats" aria-label="Statystyki dysku">
+            <div>
+              <span>Pliki</span>
+              <strong>{{fileCount}}</strong>
+            </div>
+            <div>
+              <span>Foldery</span>
+              <strong>{{folderCount}}</strong>
+            </div>
+            <div>
+              <span>Największy plik</span>
+              <strong>{{FormatBytes(largestFileBytes)}}</strong>
+            </div>
+          </section>
+          <section class="storage-largest" aria-label="Największe pliki">
+            <h2>Największe pliki</h2>
+            {{RenderLargestFiles(files, navigateToFolder: true)}}
+          </section>
+        </section>
+        """);
+    }
+
     public static string RenderNotFound()
     {
         return Layout("""
@@ -226,10 +275,8 @@ public static class PageRenderer
         string cards = visibleFiles.Count == 0
             ? """<p class="empty-grid">Brak plików.</p>"""
             : string.Join("\n", visibleFiles.Select(file => RenderFileCard(file, currentView != "trash")));
-        string alert = RenderAlert(message, success: true);
         string accountInitial = GetInitial(account.Username);
         string uploadInfo = message is null ? "No upload running." : Escape(message);
-        string largestFiles = RenderLargestFiles(files);
         bool computersMode = currentView == "computers";
         bool sharedMode = currentView == "shared";
         string parentDirectory = GetParentDirectory(currentDirectory);
@@ -317,24 +364,14 @@ public static class PageRenderer
               <img class="drive-brand-logo" src="/assets/logo.png" alt="SkyVault">
               <span>SkyVault</span>
             </a>
-            <div class="drive-search">
-              <span class="search-icon"></span>
-              <input id="globalSearchInput" type="search" autocomplete="off" placeholder="Szukaj na SkyVault">
-              <button class="drive-search-tune" type="button" aria-label="Opcje wyszukiwania">
-                <span class="tune-icon"></span>
-              </button>
-            </div>
             <div class="drive-top-actions" aria-label="Narzędzia">
-              <button class="drive-icon-button" type="button" aria-label="Stan synchronizacji"><span class="sync-status-icon"></span></button>
-              <button class="drive-icon-button" type="button" aria-label="Pomoc"><span class="help-icon"></span></button>
+              <button class="drive-icon-button" type="button" aria-label="Pomoc" id="aboutToggle"><span class="help-icon"></span></button>
               <button class="drive-icon-button" type="button" aria-label="Ustawienia" id="settingsToggle"><span class="settings-icon"></span></button>
               <button class="drive-icon-button" type="button" aria-label="Aplikacje"><span class="apps-grid-icon"></span></button>
               <button class="drive-avatar-button" type="button" id="accountToggle" aria-label="Konto">{{Escape(accountInitial)}}</button>
             </div>
           </header>
           <aside class="sidebar">
-            <button class="new-drive-button" type="button" id="newDriveButton"><span class="plus-icon"></span><span>Nowy</span></button>
-
             <form class="upload-panel compact-upload" id="uploadForm" method="post" action="/files/upload" enctype="multipart/form-data">
               <input name="file" id="fileInput" type="file" multiple required>
               <input name="folder" id="folderInput" type="file" webkitdirectory directory multiple>
@@ -397,17 +434,11 @@ public static class PageRenderer
             </nav>
 
             <div class="storage-summary">
-              <div class="largest-files" id="largestFiles" hidden>
-                <p class="largest-title">Największe pliki</p>
-                {{largestFiles}}
-              </div>
-              <div class="drive-row">
+              <a class="drive-row drive-storage-link" href="/storage">
                 <img class="nav-icon-img" src="/assets/icons/media-flash-sd-mmc.svg" alt="">
                 <span>Skydysk</span>
-                <button class="drive-toggle" id="driveToggle" type="button" aria-label="Pokaż największe pliki" aria-expanded="false">
-                  <img class="drive-eject-icon" src="/assets/icons/media-eject.svg" alt="">
-                </button>
-              </div>
+                <img class="drive-eject-icon" src="/assets/icons/media-eject.svg" alt="">
+              </a>
               <div class="meter">
                 <span style="width: {{usedPercentText}}%"></span>
               </div>
@@ -425,6 +456,10 @@ public static class PageRenderer
               <div class="account-menu" id="accountPanel" hidden>
                 <span class="account-email">{{Escape(account.Username)}}</span>
                 <span class="avatar">{{Escape(accountInitial)}}</span>
+                <div class="account-subscription">
+                  <span>Subskrypcja</span>
+                  <strong>Plan lokalny - 5 GB</strong>
+                </div>
                 <form method="post" action="/logout">
                   <button class="secondary" type="submit">Wyloguj się</button>
                 </form>
@@ -439,16 +474,17 @@ public static class PageRenderer
                   <div class="meter"><span style="width: {{usedPercentText}}%"></span></div>
                   <p>wykorzystano {{FormatBytes(account.UsedBytes)}} z 5 GB</p>
                 </section>
-                <section>
-                  <h3>Wygląd</h3>
-                  <label class="radio-row"><span class="radio-dot active"></span>Ciemny</label>
-                  <label class="radio-row"><span class="radio-dot"></span>Zwarty</label>
-                  <label class="radio-row"><span class="radio-dot"></span>Kompaktowy</label>
-                </section>
               </div>
             </section>
 
             <div class="location-row">
+              <div class="drive-search">
+                <span class="search-icon"></span>
+                <input id="globalSearchInput" type="search" autocomplete="off" placeholder="Szukaj na SkyVault">
+                <button class="drive-search-tune" type="button" aria-label="Opcje wyszukiwania">
+                  <span class="tune-icon"></span>
+                </button>
+              </div>
               <div class="path-bar" aria-label="Current cloud path">
                 <a class="path-up" href="{{parentHref}}" aria-label="Parent folder">..</a>
                 <img class="path-folder-icon" src="/assets/icons/folder.svg" alt="" aria-hidden="true">
@@ -476,12 +512,27 @@ public static class PageRenderer
               </div>
             </div>
 
-            <div class="alert-slot">{{alert}}</div>
-
             <section class="files-panel" id="filesPanel" data-view="{{currentView}}">
               <div class="drive-filters" aria-label="Filtry">
-                <button type="button" id="typeFilterButton" data-filter-value="all">Typ elementu <span class="filter-caret"></span></button>
-                <button type="button" id="modifiedFilterButton" data-filter-value="all">Zmodyfikowano <span class="filter-caret"></span></button>
+                <label>
+                  <span>Typ elementu</span>
+                  <select id="typeFilterSelect">
+                    <option value="all">Wszystkie</option>
+                    <option value="folder">Foldery</option>
+                    <option value="file">Pliki</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Sortuj</span>
+                  <select id="modifiedSortSelect">
+                    <option value="modified-desc">Data: najnowsze</option>
+                    <option value="modified-asc">Data: najstarsze</option>
+                    <option value="name-asc">Nazwa: A-Z</option>
+                    <option value="name-desc">Nazwa: Z-A</option>
+                    <option value="size-desc">Rozmiar: największe</option>
+                    <option value="size-asc">Rozmiar: najmniejsze</option>
+                  </select>
+                </label>
               </div>
               <div class="section-head">
                 <div class="file-actions">
@@ -494,14 +545,6 @@ public static class PageRenderer
                     <button class="tool-button search-toggle" id="fileSearchToggle" type="button" aria-label="Szukaj" aria-expanded="false">
                       <span class="search-icon"></span>
                     </button>
-                    <select class="sort-select" id="sortSelect" aria-label="Sortuj pliki">
-                      <option value="modified-desc">Data: najnowsze</option>
-                      <option value="modified-asc">Data: najstarsze</option>
-                      <option value="name-asc">Nazwa: A-Z</option>
-                      <option value="name-desc">Nazwa: Z-A</option>
-                      <option value="size-desc">Rozmiar: największe</option>
-                      <option value="size-asc">Rozmiar: najmniejsze</option>
-                    </select>
                     <div class="view-switch" aria-label="File view">
                       <button class="view-button active" type="button" data-view-mode="list" aria-label="List view">
                         <span class="view-list-icon"></span>
@@ -549,6 +592,21 @@ public static class PageRenderer
             </div>
           </div>
         </div>
+        <div class="ui-confirm" id="uiAbout" hidden>
+          <div class="ui-confirm-panel about-panel" role="dialog" aria-modal="true" aria-labelledby="uiAboutTitle">
+            <img class="about-logo" src="/assets/logo.png" alt="SkyVault">
+            <p id="uiAboutTitle">SkyVault</p>
+            <dl class="file-info-list">
+              <dt>Wersja</dt>
+              <dd>{{Escape(BuildInfo.Version)}}</dd>
+              <dt>Typ</dt>
+              <dd>Prywatna chmura plików</dd>
+            </dl>
+            <div class="ui-confirm-actions">
+              <button type="button" class="primary" id="uiAboutOk">OK</button>
+            </div>
+          </div>
+        </div>
         <script>
           const form = document.getElementById('uploadForm');
           const input = document.getElementById('fileInput');
@@ -556,8 +614,6 @@ public static class PageRenderer
           const currentPath = document.getElementById('currentPath');
           const bar = document.getElementById('progressBar');
           const info = document.getElementById('uploadInfo');
-          const driveToggle = document.getElementById('driveToggle');
-          const largestFiles = document.getElementById('largestFiles');
           const pathBar = document.querySelector('.path-bar');
           const pathEditor = document.getElementById('pathEditor');
           const pathEditorInput = document.getElementById('pathEditorInput');
@@ -574,15 +630,14 @@ public static class PageRenderer
           const fileSearchBox = document.getElementById('fileSearchBox');
           const fileSearchInput = document.getElementById('fileSearchInput');
           const globalSearchInput = document.getElementById('globalSearchInput');
-          const sortSelect = document.getElementById('sortSelect');
           const emptyTrashButton = document.getElementById('emptyTrash');
-          const newDriveButton = document.getElementById('newDriveButton');
+          const aboutToggle = document.getElementById('aboutToggle');
           const settingsToggle = document.getElementById('settingsToggle');
           const settingsPanel = document.getElementById('settingsPanel');
           const accountToggle = document.getElementById('accountToggle');
           const accountPanel = document.getElementById('accountPanel');
-          const typeFilterButton = document.getElementById('typeFilterButton');
-          const modifiedFilterButton = document.getElementById('modifiedFilterButton');
+          const typeFilterSelect = document.getElementById('typeFilterSelect');
+          const modifiedSortSelect = document.getElementById('modifiedSortSelect');
           const uiConfirm = document.getElementById('uiConfirm');
           const uiConfirmText = document.getElementById('uiConfirmText');
           const uiConfirmCancel = document.getElementById('uiConfirmCancel');
@@ -595,6 +650,8 @@ public static class PageRenderer
           const uiInfo = document.getElementById('uiInfo');
           const uiInfoList = document.getElementById('uiInfoList');
           const uiInfoOk = document.getElementById('uiInfoOk');
+          const uiAbout = document.getElementById('uiAbout');
+          const uiAboutOk = document.getElementById('uiAboutOk');
           const fileRows = document.getElementById('fileRows');
           const filesTable = document.getElementById('filesTable');
           const filesGrid = document.getElementById('filesGrid');
@@ -639,20 +696,15 @@ public static class PageRenderer
           selectionBox.hidden = true;
           document.body.appendChild(selectionBox);
           hidePathEditor();
-
-          driveToggle.addEventListener('click', () => {
-            const expanded = driveToggle.getAttribute('aria-expanded') === 'true';
-            driveToggle.setAttribute('aria-expanded', String(!expanded));
-            largestFiles.hidden = expanded;
-          });
-
-          newDriveButton.addEventListener('click', (event) => {
-            const rect = newDriveButton.getBoundingClientRect();
-            showContextMenu(rect.left, rect.bottom + 8);
-          });
+          focusSelectedPath(new URLSearchParams(window.location.search).get('focus') || '');
 
           settingsToggle.addEventListener('click', () => {
             settingsPanel.hidden = !settingsPanel.hidden;
+          });
+
+          aboutToggle.addEventListener('click', () => {
+            uiAbout.hidden = false;
+            uiAboutOk.focus();
           });
 
           accountToggle.addEventListener('click', () => {
@@ -790,32 +842,17 @@ public static class PageRenderer
             });
           });
 
-          sortSelect.addEventListener('change', () => {
-            const [sort, direction] = sortSelect.value.split('-');
-            currentSort = sort;
-            sortDirection = direction;
-            sortRows();
-          });
-
-          typeFilterButton.addEventListener('click', () => {
-            typeFilter = typeFilter === 'all' ? 'folder' : typeFilter === 'folder' ? 'file' : 'all';
-            typeFilterButton.dataset.filterValue = typeFilter;
-            typeFilterButton.firstChild.textContent = typeFilter === 'folder'
-              ? 'Foldery '
-              : typeFilter === 'file'
-                ? 'Pliki '
-                : 'Typ elementu ';
+          typeFilterSelect.addEventListener('change', () => {
+            typeFilter = typeFilterSelect.value;
             applyFileFilter();
           });
 
-          modifiedFilterButton.addEventListener('click', () => {
-            modifiedFilter = modifiedFilter === 'all' ? 'today' : modifiedFilter === 'today' ? 'week' : 'all';
-            modifiedFilterButton.dataset.filterValue = modifiedFilter;
-            modifiedFilterButton.firstChild.textContent = modifiedFilter === 'today'
-              ? 'Dzisiaj '
-              : modifiedFilter === 'week'
-                ? 'Ostatnie 7 dni '
-                : 'Zmodyfikowano ';
+          modifiedSortSelect.addEventListener('change', () => {
+            const [sort, direction] = modifiedSortSelect.value.split('-');
+            currentSort = sort;
+            sortDirection = direction;
+            modifiedFilter = 'all';
+            sortRows();
             applyFileFilter();
           });
 
@@ -933,6 +970,16 @@ public static class PageRenderer
           uiInfo.addEventListener('click', (event) => {
             if (event.target === uiInfo) {
               uiInfo.hidden = true;
+            }
+          });
+
+          uiAboutOk.addEventListener('click', () => {
+            uiAbout.hidden = true;
+          });
+
+          uiAbout.addEventListener('click', (event) => {
+            if (event.target === uiAbout) {
+              uiAbout.hidden = true;
             }
           });
 
@@ -1172,6 +1219,7 @@ public static class PageRenderer
             if (event.key === 'Escape') {
               hideContextMenu();
               uiInfo.hidden = true;
+              uiAbout.hidden = true;
             }
           });
 
@@ -1370,6 +1418,28 @@ public static class PageRenderer
               .replace(/^\/+|\/+$/g, '');
 
             return cleaned ? '/?path=' + encodeURIComponent(cleaned) : '/';
+          }
+
+          function focusSelectedPath(path) {
+            if (!path) {
+              return;
+            }
+
+            const row = rowsByPath.get(path);
+
+            if (row && !row.hidden) {
+              setRowSelected(row, true);
+              row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+              return;
+            }
+
+            const card = cardsByPath.get(path);
+            const rowFromCard = card ? rowsByPath.get(card.dataset.filePath || '') || null : null;
+
+            if (rowFromCard && !rowFromCard.hidden) {
+              setRowSelected(rowFromCard, true);
+              rowFromCard.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
           }
 
           function fileItemsFromList(files) {
@@ -1837,7 +1907,7 @@ public static class PageRenderer
               return false;
             }
 
-            if (event.target.closest('tr[data-file-name], .file-card, a, input, button, .workspace-top, .location-row, .alert-slot, .context-menu, .ui-confirm')) {
+            if (event.target.closest('tr[data-file-name], .file-card, a, input, button, .workspace-top, .location-row, .context-menu, .ui-confirm')) {
               return false;
             }
 
@@ -2536,11 +2606,6 @@ public static class PageRenderer
 
             sorted.forEach((row) => fileRows.appendChild(row));
             sortedCards.forEach((card) => filesGrid.appendChild(card));
-            syncSortSelect();
-          }
-
-          function syncSortSelect() {
-            sortSelect.value = currentSort + '-' + sortDirection;
           }
 
           function applyFileFilter() {
@@ -2821,7 +2886,7 @@ public static class PageRenderer
         };
     }
 
-    private static string RenderLargestFiles(IReadOnlyList<FileEntry> files)
+    private static string RenderLargestFiles(IReadOnlyList<FileEntry> files, bool navigateToFolder = false)
     {
         const long minBytes = 2L * 1024 * 1024;
         List<FileEntry> largestFiles = files
@@ -2839,8 +2904,11 @@ public static class PageRenderer
         string items = string.Join("\n", largestFiles.Select(file =>
         {
             string encodedPath = WebUtility.UrlEncode(file.Name);
+            string href = navigateToFolder
+                ? $"/?path={WebUtility.UrlEncode(GetParentDirectory(file.Name))}&focus={encodedPath}"
+                : $"/files/open?path={encodedPath}";
             return $$"""
-            <a class="largest-file" href="/files/open?path={{encodedPath}}">
+            <a class="largest-file" href="{{href}}">
               <span>{{Escape(GetDisplayName(file.Name))}}</span>
               <strong>{{FormatBytes(file.SizeBytes)}}</strong>
             </a>
@@ -3538,6 +3606,117 @@ public static class PageRenderer
               font-size: 13px;
             }
 
+            .storage-page {
+              display: grid;
+              gap: 18px;
+              width: min(100% - 32px, 980px);
+              margin: 0 auto;
+              padding: 32px 0;
+            }
+
+            .storage-header {
+              display: grid;
+              grid-template-columns: auto minmax(0, 1fr);
+              gap: 16px;
+              align-items: center;
+            }
+
+            .storage-header h1 {
+              margin: 4px 0 0;
+              color: var(--text);
+              font-size: 30px;
+            }
+
+            .storage-overview,
+            .storage-stats,
+            .storage-largest {
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface);
+              box-shadow: var(--shadow);
+            }
+
+            .storage-overview {
+              padding: 20px;
+            }
+
+            .storage-main-stat {
+              display: flex;
+              gap: 16px;
+              align-items: baseline;
+              justify-content: space-between;
+              color: var(--text);
+            }
+
+            .storage-main-stat span {
+              font-size: 18px;
+              font-weight: 700;
+            }
+
+            .storage-main-stat strong {
+              color: var(--green);
+              font-size: 26px;
+            }
+
+            .storage-meter {
+              margin-top: 18px;
+              height: 10px;
+            }
+
+            .storage-stats {
+              display: grid;
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .storage-stats div {
+              display: grid;
+              gap: 8px;
+              padding: 18px;
+              border-right: 1px solid var(--line);
+            }
+
+            .storage-stats div:last-child {
+              border-right: 0;
+            }
+
+            .storage-stats span {
+              color: var(--muted);
+              font-size: 13px;
+              font-weight: 700;
+              text-transform: uppercase;
+            }
+
+            .storage-stats strong {
+              color: var(--text);
+              font-size: 22px;
+            }
+
+            .storage-largest {
+              overflow: hidden;
+            }
+
+            .storage-largest h2 {
+              margin: 0;
+              padding: 14px 18px;
+              border-bottom: 1px solid var(--line);
+              color: var(--text);
+              font-size: 18px;
+            }
+
+            .storage-largest .largest-list {
+              max-height: none;
+            }
+
+            .storage-largest .largest-file {
+              padding: 11px 18px;
+              border-bottom-color: var(--line);
+              color: var(--text);
+            }
+
+            .storage-largest .largest-file:hover {
+              background: var(--surface-soft);
+            }
+
             .storage-summary p {
               margin: 9px 0 0;
               font-size: 13px;
@@ -3558,6 +3737,14 @@ public static class PageRenderer
               color: #334155;
               font-size: 16px;
               font-weight: 500;
+            }
+
+            .drive-storage-link {
+              text-decoration: none;
+            }
+
+            .drive-storage-link:hover {
+              color: var(--green);
             }
 
             .drive-eject-icon {
@@ -5463,27 +5650,6 @@ public static class PageRenderer
               background: #1f2020;
             }
 
-            .new-drive-button {
-              justify-content: flex-start;
-              gap: 14px;
-              width: 110px;
-              min-height: 54px;
-              margin: 0 0 12px;
-              padding: 0 20px;
-              border-radius: 16px;
-              background: #303134;
-              color: #f1f3f4;
-              box-shadow: none;
-              font-size: 15px;
-              font-weight: 600;
-            }
-
-            .new-drive-button:hover {
-              background: #3a3b3d;
-              box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
-            }
-
-            .plus-icon,
             .tune-icon,
             .sync-status-icon,
             .help-icon,
@@ -5496,33 +5662,6 @@ public static class PageRenderer
               display: inline-block;
               flex: 0 0 auto;
               color: currentColor;
-            }
-
-            .plus-icon {
-              width: 18px;
-              height: 18px;
-            }
-
-            .plus-icon::before,
-            .plus-icon::after {
-              content: "";
-              position: absolute;
-              background: currentColor;
-              border-radius: 999px;
-            }
-
-            .plus-icon::before {
-              left: 8px;
-              top: 1px;
-              width: 2px;
-              height: 16px;
-            }
-
-            .plus-icon::after {
-              left: 1px;
-              top: 8px;
-              width: 16px;
-              height: 2px;
             }
 
             .tune-icon {
@@ -5660,10 +5799,14 @@ public static class PageRenderer
               top: 56px;
               z-index: 12;
               display: grid;
+              grid-template-columns: 1fr;
+              gap: 10px;
               justify-items: center;
-              width: min(410px, calc(100vw - 32px));
-              padding: 24px;
-              border-radius: 28px;
+              width: min(256px, calc(100vw - 32px));
+              min-width: 0;
+              max-width: none;
+              padding: 14px;
+              border-radius: 4px;
               background: #2b2c2c;
               box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
             }
@@ -5673,15 +5816,44 @@ public static class PageRenderer
             }
 
             .account-email {
+              display: block;
+              width: 100%;
               max-width: 100%;
+              overflow: hidden;
               color: #e8eaed;
+              text-align: center;
+              text-overflow: ellipsis;
+              white-space: nowrap;
             }
 
             .account-menu .avatar {
-              width: 72px;
-              height: 72px;
-              margin-top: 14px;
-              font-size: 28px;
+              width: 42px;
+              height: 42px;
+              margin-top: 0;
+              font-size: 16px;
+            }
+
+            .account-subscription {
+              display: grid;
+              gap: 3px;
+              width: 100%;
+              margin-top: 0;
+              padding: 10px;
+              border: 1px solid #3f474d;
+              border-radius: 3px;
+              background: #20262a;
+              text-align: left;
+            }
+
+            .account-subscription span {
+              color: #a9b0b5;
+              font-size: 12px;
+            }
+
+            .account-subscription strong {
+              color: #d7dadd;
+              font-size: 13px;
+              font-weight: 600;
             }
 
             .account-menu form {
@@ -5690,9 +5862,9 @@ public static class PageRenderer
 
             .account-menu .secondary {
               width: 100%;
-              min-height: 48px;
-              margin-top: 18px;
-              border-radius: 24px;
+              min-height: 34px;
+              margin-top: 0;
+              border-radius: 3px;
               background: #1f2020;
               color: #e8eaed;
             }
@@ -6028,6 +6200,8 @@ public static class PageRenderer
             }
 
             .drive-search {
+              display: grid;
+              width: 100%;
               height: 30px;
               grid-template-columns: 18px minmax(0, 1fr) 28px;
               gap: 7px;
@@ -6080,40 +6254,6 @@ public static class PageRenderer
               padding: 8px 6px;
               border-right: 1px solid #3f474d;
               background: #252d32;
-            }
-
-            .new-drive-button {
-              width: 100%;
-              min-height: 28px;
-              margin: 0 0 4px;
-              padding: 0 8px;
-              border: 1px solid #4b555c;
-              border-radius: 3px;
-              background: #303940;
-              color: #dfe3e6;
-              font-size: 13px;
-              font-weight: 500;
-              box-shadow: none;
-            }
-
-            .new-drive-button:hover {
-              background: #39434a;
-              box-shadow: none;
-            }
-
-            .plus-icon {
-              width: 14px;
-              height: 14px;
-            }
-
-            .plus-icon::before {
-              left: 6px;
-              height: 12px;
-            }
-
-            .plus-icon::after {
-              top: 6px;
-              width: 12px;
             }
 
             .nav-list {
@@ -6199,7 +6339,9 @@ public static class PageRenderer
             }
 
             .location-row {
-              padding: 4px 8px;
+              display: grid;
+              gap: 4px;
+              padding: 4px 8px 6px;
               border-bottom: 1px solid #3f474d;
               background: #2d3439;
             }
@@ -6245,24 +6387,34 @@ public static class PageRenderer
             }
 
             .drive-filters {
+              display: flex;
+              flex-wrap: wrap;
               gap: 6px;
               padding: 5px 8px;
               border-bottom: 1px solid #30363b;
               background: #151719;
             }
 
-            .drive-filters button {
-              min-height: 26px;
-              padding: 0 9px;
+            .drive-filters label {
+              display: inline-grid;
+              grid-template-columns: auto minmax(135px, auto);
+              gap: 6px;
+              align-items: center;
+              min-height: 28px;
+              color: #aeb5ba;
+              font-size: 12px;
+              font-weight: 400;
+            }
+
+            .drive-filters select {
+              height: 26px;
+              min-width: 150px;
+              padding: 0 8px;
               border: 1px solid #596167;
               border-radius: 3px;
               background: #20262a;
               color: #d7dadd;
-              font-size: 12px;
-            }
-
-            .drive-filters button:hover {
-              background: #2d3439;
+              font: inherit;
             }
 
             .section-head {
@@ -6629,6 +6781,51 @@ public static class PageRenderer
               background: #242b30;
             }
 
+            .about-panel {
+              width: min(340px, calc(100vw - 32px));
+              grid-template-columns: 1fr;
+              justify-items: center;
+              text-align: center;
+            }
+
+            .about-logo {
+              width: 72px;
+              height: 72px;
+              object-fit: contain;
+              margin-bottom: 10px;
+            }
+
+            #uiAboutTitle {
+              margin: 0 0 12px;
+              color: #ffffff;
+              font-size: 20px;
+              font-weight: 700;
+            }
+
+            .about-panel .file-info-list {
+              width: min(240px, 100%);
+              grid-template-columns: 82px minmax(0, 1fr);
+              justify-self: center;
+              text-align: left;
+            }
+
+            .about-panel .file-info-list dt {
+              text-align: right;
+            }
+
+            .about-panel .file-info-list dd {
+              text-align: left;
+            }
+
+            .about-panel .ui-confirm-actions {
+              justify-self: center;
+              width: min(120px, 100%);
+            }
+
+            .about-panel .ui-confirm-actions .primary {
+              width: 100%;
+            }
+
             .device-session-panel {
               padding: 10px 8px 44px;
             }
@@ -6839,11 +7036,6 @@ public static class PageRenderer
                 grid-column: 1;
               }
 
-              .drive-search {
-                grid-column: 1 / -1;
-                order: 3;
-              }
-
               .drive-top-actions {
                 grid-column: 2;
               }
@@ -6890,6 +7082,32 @@ public static class PageRenderer
                 grid-template-columns: 1fr;
                 width: min(100% - 28px, 520px);
                 gap: 24px;
+              }
+
+              .storage-page {
+                width: min(100% - 24px, 520px);
+                padding: 18px 0;
+              }
+
+              .storage-header {
+                grid-template-columns: 1fr;
+              }
+
+              .storage-header .button {
+                width: max-content;
+              }
+
+              .storage-stats {
+                grid-template-columns: 1fr;
+              }
+
+              .storage-stats div {
+                border-right: 0;
+                border-bottom: 1px solid var(--line);
+              }
+
+              .storage-stats div:last-child {
+                border-bottom: 0;
               }
 
               .auth-brand h1 {
