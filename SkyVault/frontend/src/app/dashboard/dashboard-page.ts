@@ -651,7 +651,16 @@ export class DashboardPage {
 
   async downloadSelectedZip() {
     if (!this.selectedPaths().length) return;
-    const response = await this.api.postForm('/files/download-zip', { paths: this.selectedPaths().join('\n') });
+    const items = this.selectedZipItems();
+    if (!items.length) {
+      this.message.set('Nie znaleziono zaznaczonych plików.');
+      return;
+    }
+
+    const response = await this.api.postForm('/files/download-zip', {
+      paths: items.map((item) => item.pathHash).join('\n'),
+      zipNames: items.map((item) => item.name).join('\n'),
+    });
     if (!response.ok) {
       this.message.set('Nie udało się przygotować ZIP.');
       return;
@@ -1179,6 +1188,26 @@ export class DashboardPage {
     }
 
     return [...selectors];
+  }
+
+  private selectedZipItems() {
+    const selected = this.selectedPaths();
+    const items = new Map<string, { pathHash: string; name: string }>();
+
+    for (const selectedPath of selected) {
+      const item = this.files.find((file) => file.name === selectedPath);
+      if (!item) continue;
+
+      for (const affectedItem of this.getAffectedItemsForPath(item)) {
+        if (affectedItem.isFolder || !affectedItem.pathHash) continue;
+        items.set(affectedItem.pathHash, {
+          pathHash: affectedItem.pathHash,
+          name: affectedItem.name,
+        });
+      }
+    }
+
+    return [...items.values()];
   }
 
   private async setMessageFromJsonResponse(response: Response, fallback: string) {

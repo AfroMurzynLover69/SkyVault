@@ -660,6 +660,7 @@ public sealed class CloudWebServer
             }
 
             IReadOnlyList<string> selectedFiles = ParseSelectedFiles(request.Form.GetValueOrDefault("paths", ""));
+            IReadOnlyList<string> zipNames = ParseSelectedFiles(request.Form.GetValueOrDefault("zipNames", ""));
             long selectedBytes = fileStorage.GetTotalSizeBytes(email, selectedFiles);
 
             if (selectedBytes > MaxZipBytes)
@@ -667,16 +668,14 @@ public sealed class CloudWebServer
                 return Json(new { error = $"ZIP is limited to {FormatBytes(MaxZipBytes)}. Select fewer files." }, 413, "Payload Too Large");
             }
 
-            byte[]? zip = await fileStorage.CreateZipAsync(email, selectedFiles);
+            FileDownload? zip = await fileStorage.CreateZipDownloadAsync(email, selectedFiles, zipNames, cancellationToken);
 
             if (zip is null)
             {
                 return Json(new { error = "Select files first." }, 400, "Bad Request");
             }
 
-            var response = new HttpResponse(200, "OK", zip, "application/zip");
-            response.Headers["Content-Disposition"] = "attachment; filename=\"skyvault-selection.zip\"";
-            return response;
+            return BuildDownloadResponse(request, zip, "application/zip", inline: false);
         }
 
         if (request.Method == "POST" && request.Path == "/files/move")

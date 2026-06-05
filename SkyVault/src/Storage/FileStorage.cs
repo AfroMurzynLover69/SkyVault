@@ -250,7 +250,17 @@ public sealed class FileStorage
     public async Task<byte[]?> ReadFileAsync(string username, string fileName)
     {
         FileDownload? download = await OpenReadStreamAsync(username, fileName);
+        return await ReadDownloadBytesAsync(download);
+    }
 
+    public async Task<byte[]?> ReadFileByPathHashAsync(string username, string pathHash)
+    {
+        FileDownload? download = await OpenReadStreamByPathHashAsync(username, pathHash);
+        return await ReadDownloadBytesAsync(download);
+    }
+
+    private static async Task<byte[]?> ReadDownloadBytesAsync(FileDownload? download)
+    {
         if (download is null)
         {
             return null;
@@ -314,40 +324,115 @@ public sealed class FileStorage
         return Task.FromResult<FileDownload?>(null);
     }
 
-    public async Task<byte[]?> CreateZipAsync(string username, IReadOnlyList<string> fileNames)
+    public async Task<byte[]?> CreateZipAsync(string username, IReadOnlyList<string> fileNames, IReadOnlyList<string>? zipNames = null)
     {
         username = NormalizeEmail(username);
-        List<string> validFileNames = fileNames
-            .Select(NormalizeRelativePath)
-            .Where(IsValidRelativePath)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+        List<ZipSelection> selections = BuildZipSelections(fileNames, zipNames);
 
-        if (validFileNames.Count == 0)
+        if (selections.Count == 0)
         {
             return null;
         }
 
         await using var zipBytes = new MemoryStream();
+        int writtenEntries;
 
         using (var archive = new ZipArchive(zipBytes, ZipArchiveMode.Create, leaveOpen: true))
         {
-            foreach (string fileName in validFileNames)
-            {
-                byte[]? content = await ReadFileAsync(username, fileName);
-
-                if (content is null)
-                {
-                    continue;
-                }
-
-                ZipArchiveEntry entry = archive.CreateEntry(fileName, CompressionLevel.Fastest);
-                await using Stream entryStream = entry.Open();
-                await entryStream.WriteAsync(content);
-            }
+            writtenEntries = await WriteZipEntriesAsync(username, selections, archive);
         }
 
-        return zipBytes.Length == 0 ? null : zipBytes.ToArray();
+        return writtenEntries == 0 ? null : zipBytes.ToArray();
+    }
+
+    public async Task<FileDownload?> CreateZipDownloadAsync(string username, IReadOnlyList<string> fileNames, IReadOnlyList<string>? zipNames = null, CancellationToken cancellationToken = default)
+    {
+        username = NormalizeEmail(username);
+        List<ZipSelection> selections = BuildZipSelections(fileNames, zipNames);
+
+        if (selections.Count == 0)
+        {
+            return null;
+        }
+
+        string tempDirectory = Path.Combine(Path.GetTempPath(), "SkyVault", "zip-downloads");
+        Directory.CreateDirectory(tempDirectory);
+        string tempPath = Path.Combine(tempDirectory, $"{Guid.NewGuid():N}.zip");
+
+        try
+        {
+            await using (var output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                using var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: false);
+                int writtenEntries = await WriteZipEntriesAsync(username, selections, archive, cancellationToken);
+
+                if (writtenEntries == 0)
+                {
+                    DeleteFileQuietly(tempPath);
+                    return null;
+                }
+            }
+
+            var stream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+            return new FileDownload("skyvault-selection.zip", new FileInfo(tempPath).Length, DateTime.UtcNow, stream);
+        }
+        catch
+        {
+            DeleteFileQuietly(tempPath);
+            throw;
+        }
+    }
+
+    private async Task<int> WriteZipEntriesAsync(string username, IReadOnlyList<ZipSelection> selections, ZipArchive archive, CancellationToken cancellationToken = default)
+    {
+        int writtenEntries = 0;
+
+        foreach (ZipSelection selection in selections)
+        {
+            FileDownload? download = IsValidPathHash(selection.Selector)
+                ? await OpenReadStreamByPathHashAsync(username, selection.Selector)
+                : await OpenReadStreamAsync(username, selection.Selector);
+
+            if (download is null)
+            {
+                continue;
+            }
+
+            await using Stream input = download.Stream;
+            ZipArchiveEntry entry = archive.CreateEntry(selection.ZipName, CompressionLevel.Fastest);
+            await using Stream entryStream = entry.Open();
+            await input.CopyToAsync(entryStream, 64 * 1024, cancellationToken);
+            writtenEntries += 1;
+        }
+
+        return writtenEntries;
+    }
+
+    private static List<ZipSelection> BuildZipSelections(IReadOnlyList<string> fileNames, IReadOnlyList<string>? zipNames)
+    {
+        var selections = new List<ZipSelection>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        for (int index = 0; index < fileNames.Count; index += 1)
+        {
+            string selector = NormalizeRelativePath(fileNames[index]);
+
+            if (!IsValidRelativePath(selector) || !seen.Add(selector))
+            {
+                continue;
+            }
+
+            string zipName = index < (zipNames?.Count ?? 0) ? NormalizeRelativePath(zipNames![index]) : selector;
+
+            if (!IsValidRelativePath(zipName))
+            {
+                zipName = selector;
+            }
+
+            selections.Add(new ZipSelection(selector, zipName));
+        }
+
+        return selections;
     }
 
     public long GetTotalSizeBytes(string username, IReadOnlyList<string> fileNames)
@@ -357,7 +442,10 @@ public sealed class FileStorage
             .Select(NormalizeRelativePath)
             .Where(IsValidRelativePath)
             .Distinct(StringComparer.Ordinal)
-            .Select(path => LoadMergedMetadata(username).Entries.FirstOrDefault(entry => !entry.InTrash && !entry.IsFolder && entry.VirtualPath == path)?.StoredSizeBytes ?? 0)
+            .Select(path => LoadMergedMetadata(username).Entries.FirstOrDefault(entry =>
+                !entry.InTrash
+                && !entry.IsFolder
+                && (string.Equals(entry.PathHash, path, StringComparison.Ordinal) || string.Equals(entry.VirtualPath, path, StringComparison.Ordinal)))?.StoredSizeBytes ?? 0)
             .Sum();
     }
 
@@ -1401,6 +1489,8 @@ public sealed class FileStorage
 }
 
 public sealed record FileDownload(string RelativePath, long Length, DateTime ModifiedAtUtc, Stream Stream);
+
+internal sealed record ZipSelection(string Selector, string ZipName);
 
 public sealed record EncryptedPathUpdate(
     string SourcePathHash,
