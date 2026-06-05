@@ -426,6 +426,38 @@
   </div>
 </div>
 
+@if (filePreviewLoading()) {
+  <div class="ui-confirm preview-modal">
+    <div class="ui-confirm-panel preview-dialog preview-loading-panel" role="dialog" aria-modal="true">
+      <p>Wczytuję podgląd...</p>
+    </div>
+  </div>
+}
+
+@if (filePreview(); as preview) {
+  <div class="ui-confirm preview-modal" (click)="closeFilePreview()">
+    <div class="ui-confirm-panel preview-dialog" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+      <header class="preview-top">
+        <div class="preview-title">
+          <p class="eyebrow">Podgląd</p>
+          <h1 [title]="preview.name">{{ preview.name }}</h1>
+        </div>
+        <button class="preview-close-button" type="button" aria-label="Zamknij podgląd" (click)="closeFilePreview()">Zamknij</button>
+      </header>
+
+      <div class="preview-panel">
+        @if (preview.kind === 'image') {
+          <img class="preview-media preview-image" [src]="preview.objectUrl" [alt]="preview.name">
+        } @else if (preview.kind === 'audio') {
+          <audio class="preview-media preview-audio" controls [src]="preview.objectUrl"></audio>
+        } @else {
+          <pre class="text-preview">{{ preview.text }}</pre>
+        }
+      </div>
+    </div>
+  </div>
+}
+
 @if (customModal(); as modal) {
   <div class="ui-confirm" (click)="onModalCancel()">
     <form class="ui-confirm-panel" role="dialog" aria-modal="true" (click)="$event.stopPropagation()" (submit)="onModalSubmit($event)">

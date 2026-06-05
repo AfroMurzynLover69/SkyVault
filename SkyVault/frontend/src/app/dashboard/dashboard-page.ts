@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { Component, EventEmitter, HostListener, Input, Output, computed, signal } from '@angular/core';
+import { Component, EventEmitter, HostListener, Input, OnDestroy, Output, computed, signal } from '@angular/core';
 import { AccountState, DeviceSessionState, FileItem, ViewMode } from '../core/models';
 import { ApiService } from '../core/api.service';
 import { CryptoService } from '../core/crypto.service';
@@ -42,6 +42,15 @@ interface StorageTypeStat {
   sizeBytes: number;
 }
 
+type FilePreviewKind = 'image' | 'audio' | 'text';
+
+interface FilePreviewState {
+  name: string;
+  kind: FilePreviewKind;
+  text: string;
+  objectUrl: string;
+}
+
 const viewModes = new Set<ViewMode>(['home', 'computers', 'documents', 'images', 'videos', 'music', 'recent', 'starred', 'trash', 'storage']);
 
 @Component({
@@ -50,7 +59,7 @@ const viewModes = new Set<ViewMode>(['home', 'computers', 'documents', 'images',
   templateUrl: './dashboard-page.html',
   styleUrl: './dashboard-page.css',
 })
-export class DashboardPage {
+export class DashboardPage implements OnDestroy {
   @Input({ required: true }) account!: AccountState;
   @Input() files: FileItem[] = [];
   @Input() trashFiles: FileItem[] = [];
@@ -95,6 +104,8 @@ export class DashboardPage {
   readonly dropDebug = signal('');
   readonly typeFilter = signal('all');
   readonly sortMode = signal('modified-desc');
+  readonly filePreview = signal<FilePreviewState | null>(null);
+  readonly filePreviewLoading = signal(false);
   readonly usedPercent = computed(() => Math.min(100, Math.max(0, this.account.usedBytes * 100 / this.account.quotaBytes)));
   readonly uploadPanelTitle = computed(() => {
     const items = this.uploadQueue();
@@ -145,14 +156,21 @@ export class DashboardPage {
   displayName = displayName;
   private activeUploadController: AbortController | null = null;
   private activeUploadSessionId: string | null = null;
+  private previewObjectUrl: string | null = null;
+  private previewRequestId = 0;
 
   constructor(
     private readonly api: ApiService,
     private readonly crypto: CryptoService,
   ) {}
 
+  ngOnDestroy() {
+    this.closeFilePreview();
+  }
+
   navigate(view: ViewMode, path = '', event?: Event) {
     event?.preventDefault();
+    this.closeFilePreview();
     this.currentView.set(view);
     this.currentPath.set(normalizePath(path));
     this.selectedPaths.set([]);
@@ -217,7 +235,7 @@ export class DashboardPage {
     if (this.currentView() === 'trash') {
       return;
     }
-    await this.download(item);
+    await this.previewFile(item);
   }
 
   async uploadFiles(fileList: FileList | null) {
@@ -449,6 +467,73 @@ export class DashboardPage {
     const decrypted = await this.crypto.decryptVaultBlob(await response.blob());
     saveBlob(decrypted, displayName(item.name));
     this.message.set('Pobrano.');
+  }
+
+  async previewFile(item: FileItem) {
+    const requestId = ++this.previewRequestId;
+    this.revokePreviewObjectUrl();
+    this.filePreview.set(null);
+    this.filePreviewLoading.set(true);
+    this.message.set('Wczytuję podgląd...');
+
+    try {
+      const response = await this.api.downloadFile(item);
+      if (!response.ok) {
+        if (requestId === this.previewRequestId) {
+          this.message.set('Nie udało się wczytać podglądu.');
+        }
+        return;
+      }
+
+      const decrypted = await this.crypto.decryptVaultBlob(await response.blob());
+      if (requestId !== this.previewRequestId) {
+        return;
+      }
+
+      const kind = this.filePreviewKind(item);
+      const name = displayName(item.name);
+      if (kind === 'text') {
+        const text = await decrypted.text();
+        if (requestId !== this.previewRequestId) {
+          return;
+        }
+
+        this.filePreviewLoading.set(false);
+        this.filePreview.set({
+          name,
+          kind,
+          text,
+          objectUrl: '',
+        });
+      } else {
+        const objectUrl = URL.createObjectURL(decrypted.slice(0, decrypted.size, this.previewMimeType(item, kind)));
+        this.previewObjectUrl = objectUrl;
+        this.filePreviewLoading.set(false);
+        this.filePreview.set({
+          name,
+          kind,
+          text: '',
+          objectUrl,
+        });
+      }
+
+      this.message.set('Podgląd gotowy.');
+    } catch (error) {
+      if (requestId === this.previewRequestId) {
+        this.message.set(error instanceof Error ? error.message : 'Nie udało się wczytać podglądu.');
+      }
+    } finally {
+      if (requestId === this.previewRequestId) {
+        this.filePreviewLoading.set(false);
+      }
+    }
+  }
+
+  closeFilePreview() {
+    this.previewRequestId += 1;
+    this.revokePreviewObjectUrl();
+    this.filePreview.set(null);
+    this.filePreviewLoading.set(false);
   }
 
   showFileInfo(item: FileItem) {
@@ -824,6 +909,7 @@ export class DashboardPage {
       this.hideContextMenu();
       this.showPathEditor.set(false);
       this.showInfoPanel.set(false);
+      this.closeFilePreview();
       return;
     }
 
@@ -950,6 +1036,53 @@ export class DashboardPage {
     if (/\.(mp4|webm|mkv|mov|avi|ogg)$/i.test(name)) return 'videos';
     if (/\.(mp3|wav|flac|m4a|aac|opus)$/i.test(name)) return 'music';
     return 'other';
+  }
+
+  private filePreviewKind(file: FileItem): FilePreviewKind {
+    if (this.fileType(file) === 'images') return 'image';
+    if (this.fileType(file) === 'music') return 'audio';
+    return 'text';
+  }
+
+  private previewMimeType(file: FileItem, kind: FilePreviewKind) {
+    const extension = displayName(file.name).split('.').pop()?.toLowerCase() ?? '';
+
+    if (kind === 'image') {
+      const imageTypes: Record<string, string> = {
+        avif: 'image/avif',
+        bmp: 'image/bmp',
+        gif: 'image/gif',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        png: 'image/png',
+        svg: 'image/svg+xml',
+        webp: 'image/webp',
+      };
+      return imageTypes[extension] ?? 'image/*';
+    }
+
+    if (kind === 'audio') {
+      const audioTypes: Record<string, string> = {
+        aac: 'audio/aac',
+        flac: 'audio/flac',
+        m4a: 'audio/mp4',
+        mp3: 'audio/mpeg',
+        opus: 'audio/ogg',
+        wav: 'audio/wav',
+      };
+      return audioTypes[extension] ?? 'audio/*';
+    }
+
+    return 'text/plain;charset=utf-8';
+  }
+
+  private revokePreviewObjectUrl() {
+    if (!this.previewObjectUrl) {
+      return;
+    }
+
+    URL.revokeObjectURL(this.previewObjectUrl);
+    this.previewObjectUrl = null;
   }
 
   private hasDroppedFiles(event: DragEvent) {
