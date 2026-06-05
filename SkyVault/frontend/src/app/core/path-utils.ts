@@ -55,6 +55,7 @@ export function iconFor(file: FileItem) {
 
 export function workspaceTitle(view: ViewMode, currentPath: string) {
   if (view === 'trash') return 'Kosz';
+  if (view === 'storage') return 'Skydysk';
   if (view === 'computers') return 'Komputery';
   if (view === 'documents') return 'Dokumenty';
   if (view === 'images') return 'Obrazy';

@@ -31,17 +31,18 @@ export class ApiService {
     };
   }
 
-  async postForm(url: string, fields: Record<string, string>, followRedirect = false) {
+  async postForm(url: string, fields: Record<string, string>, followRedirect = false, signal?: AbortSignal) {
     return await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(fields).toString(),
       redirect: followRedirect ? 'follow' : 'manual',
+      signal,
     });
   }
 
-  async postJsonForm<T>(url: string, fields: Record<string, string>) {
-    const response = await this.postForm(url, fields);
+  async postJsonForm<T>(url: string, fields: Record<string, string>, signal?: AbortSignal) {
+    const response = await this.postForm(url, fields, false, signal);
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
@@ -62,11 +63,11 @@ export class ApiService {
     return await fetch('/files/upload', { method: 'POST', body: data });
   }
 
-  async startChunkUpload(fields: Record<string, string>) {
-    return await this.postJsonForm<ChunkUploadSessionState>('/api/uploads/start', fields);
+  async startChunkUpload(fields: Record<string, string>, signal?: AbortSignal) {
+    return await this.postJsonForm<ChunkUploadSessionState>('/api/uploads/start', fields, signal);
   }
 
-  async uploadChunk(uploadId: string, chunkIndex: number, bytes: Uint8Array) {
+  async uploadChunk(uploadId: string, chunkIndex: number, bytes: Uint8Array, signal?: AbortSignal) {
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
     const body = new Blob([copy.buffer], { type: 'application/octet-stream' });
@@ -74,6 +75,7 @@ export class ApiService {
       method: 'PUT',
       headers: { 'Content-Type': 'application/octet-stream' },
       body,
+      signal,
     });
 
     const payload = await response.json().catch(() => ({}));
@@ -84,10 +86,11 @@ export class ApiService {
     return payload as ChunkUploadSessionState;
   }
 
-  async completeChunkUpload(uploadId: string) {
+  async completeChunkUpload(uploadId: string, signal?: AbortSignal) {
     return await this.postJsonForm<{ uploadId: string; status: string; savedPath: string }>(
       `/api/uploads/${encodeURIComponent(uploadId)}/complete`,
       {},
+      signal,
     );
   }
 

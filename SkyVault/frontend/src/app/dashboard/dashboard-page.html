@@ -64,8 +64,7 @@
     </nav>
 
     <div class="storage-summary">
-      <div class="upload-queue-list" id="uploadQueueList" hidden aria-label="Kolejka uploadów"></div>
-      <a class="drive-row drive-storage-link" href="/storage">
+      <a class="drive-row drive-storage-link" [class.active]="currentView() === 'storage'" href="/?view=storage" (click)="navigate('storage', '', $event)">
         <img class="nav-icon-img" src="/assets/icons/media-flash-sd-mmc.svg" alt="">
         <span>Skydysk</span>
         <img class="drive-eject-icon" src="/assets/icons/media-eject.svg" alt="">
@@ -157,11 +156,8 @@
       [attr.data-view]="currentView()"
       [class.is-grid-view]="fileViewMode() === 'grid'"
       [class.is-dragging]="isDraggingFiles()"
-      (dragover)="onDragOver($event)"
-      (dragleave)="onDragLeave($event)"
-      (drop)="onDrop($event)"
     >
-      <div class="drive-filters" aria-label="Filtry">
+      <div class="drive-filters" aria-label="Filtry" [hidden]="currentView() === 'computers' || currentView() === 'storage'">
         <label>
           <span>Typ elementu</span>
           <select id="typeFilterSelect" [value]="typeFilter()" (change)="typeFilter.set($any($event.target).value)">
@@ -182,7 +178,7 @@
           </select>
         </label>
       </div>
-      <div class="section-head">
+      <div class="section-head" [hidden]="currentView() === 'storage'">
         <div class="file-actions">
           <span id="fileCount">{{ visibleFiles().length }} element(y)</span>
           <div class="file-actions-right">
@@ -204,7 +200,61 @@
         </div>
       </div>
 
-      @if (currentView() === 'computers') {
+      @if (currentView() === 'storage') {
+        <section class="storage-page dashboard-storage">
+          <div class="storage-overview">
+            <div class="storage-main-stat">
+              <span>Zajęte miejsce</span>
+              <strong>{{ formatBytes(account.usedBytes) }}</strong>
+            </div>
+            <div class="meter storage-meter">
+              <span [style.width.%]="usedPercent()"></span>
+            </div>
+            <p>{{ formatBytes(account.usedBytes) }} z {{ formatBytes(account.quotaBytes) }}</p>
+          </div>
+
+          <div class="storage-stats">
+            <div>
+              <span>Pliki</span>
+              <strong>{{ activeFileCount() }}</strong>
+            </div>
+            <div>
+              <span>Foldery</span>
+              <strong>{{ activeFolderCount() }}</strong>
+            </div>
+            <div>
+              <span>W koszu</span>
+              <strong>{{ trashFileCount() }}</strong>
+            </div>
+          </div>
+
+          <section class="storage-largest">
+            <h2>Typy plików</h2>
+            <div class="largest-list">
+              @for (stat of storageTypeStats(); track stat.label) {
+                <div class="largest-file">
+                  <span>{{ stat.label }} · {{ stat.count }}</span>
+                  <strong>{{ formatBytes(stat.sizeBytes) }}</strong>
+                </div>
+              }
+            </div>
+          </section>
+
+          <section class="storage-largest">
+            <h2>Największe pliki</h2>
+            <div class="largest-list">
+              @for (file of largestFiles(); track file.name) {
+                <div class="largest-file">
+                  <span>{{ displayName(file.name) }}</span>
+                  <strong>{{ formatBytes(file.sizeBytes) }}</strong>
+                </div>
+              } @empty {
+                <p class="largest-empty">Brak plików do analizy.</p>
+              }
+            </div>
+          </section>
+        </section>
+      } @else if (currentView() === 'computers') {
         <section class="device-session-panel" aria-label="Historia urządzeń">
           <div class="device-session-head">
             <span>Urządzenie</span>
@@ -234,7 +284,7 @@
         <app-file-browser
           [files]="visibleFiles()"
           [selectedPaths]="selectedPaths()"
-          [allowOpen]="currentView() !== 'trash'"
+          [allowOpen]="true"
           [viewMode]="fileViewMode()"
           (open)="openItem($event)"
           (toggleSelect)="toggleSelect($event)"
@@ -247,15 +297,61 @@
   </main>
 </section>
 
-<aside class="upload-progress-toast" [hidden]="!message()" aria-live="polite">
+<aside class="upload-progress-toast" [hidden]="!uploadQueue().length" aria-live="polite">
   <div class="upload-progress-head">
-    <strong>Upload</strong>
-    <span>{{ uploadProgress() }}%</span>
+    <strong>{{ uploadPanelTitle() }}</strong>
+    <div class="upload-progress-actions">
+      <button type="button" class="upload-icon-button" aria-label="Zwiń panel uploadu" (click)="uploadPanelCollapsed.update(value => !value)">
+        <span class="upload-chevron" [class.is-collapsed]="uploadPanelCollapsed()"></span>
+      </button>
+      <button type="button" class="upload-icon-button" aria-label="Zamknij panel uploadu" [disabled]="uploadActive()" (click)="clearUploadQueue()">
+        <span class="upload-close-icon"></span>
+      </button>
+    </div>
   </div>
+
+  <div class="upload-progress-subhead">
+    <span>{{ uploadPanelSubtitle() }}</span>
+    @if (uploadActive()) {
+      <button type="button" (click)="cancelUpload()">Anuluj</button>
+    }
+  </div>
+
+  @if (dropDebug()) {
+    <p class="upload-debug-line">{{ dropDebug() }}</p>
+  }
+
   <div class="progress">
     <span [style.width.%]="uploadProgress()"></span>
   </div>
-  <p>{{ message() }}</p>
+
+  <div class="upload-queue-list" [hidden]="uploadPanelCollapsed()" aria-label="Kolejka uploadów">
+    @for (item of uploadQueue(); track item.id) {
+      <div class="upload-queue-item" [attr.data-status]="item.status">
+        <span class="upload-file-icon" aria-hidden="true"></span>
+        <div class="upload-queue-main">
+          <span class="upload-queue-name" [title]="item.name">{{ displayName(item.name) }}</span>
+          <span class="upload-queue-detail">{{ item.detail }}{{ item.speedText ? ' · ' + item.speedText : '' }} · {{ formatBytes(item.sizeBytes) }}</span>
+          @if (item.status === 'uploading') {
+            <span class="upload-row-meter"><span [style.width.%]="item.percent"></span></span>
+          }
+        </div>
+        <span class="upload-status" [attr.data-status]="item.status">
+          @if (item.status === 'uploading' || item.status === 'checking') {
+            <span class="upload-spinner"></span>
+          } @else if (item.status === 'done') {
+            <span class="upload-check-icon"></span>
+          } @else if (item.status === 'error') {
+            <span class="upload-error-icon"></span>
+          } @else if (item.status === 'cancelled') {
+            <span class="upload-cancel-icon"></span>
+          } @else {
+            <span class="upload-pending-dot"></span>
+          }
+        </span>
+      </div>
+    }
+  </div>
 </aside>
 
 <div

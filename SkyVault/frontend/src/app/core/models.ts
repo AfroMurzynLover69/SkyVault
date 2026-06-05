@@ -1,5 +1,5 @@
 export type AuthMode = 'login' | 'register';
-export type ViewMode = 'home' | 'computers' | 'documents' | 'images' | 'videos' | 'music' | 'recent' | 'starred' | 'trash';
+export type ViewMode = 'home' | 'computers' | 'documents' | 'images' | 'videos' | 'music' | 'recent' | 'starred' | 'trash' | 'storage';
 
 export interface FileItem {
   name: string;

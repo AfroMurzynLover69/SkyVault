@@ -72,6 +72,18 @@ To edit runtime settings from the console:
 ./SkyVault.sh
 ```
 
+`./SkyVault.sh` checks whether the frontend output is older than `SkyVault/frontend/src`,
+`public`, or Angular/package config files. It rebuilds the frontend only when needed,
+then starts the .NET server with the latest available UI.
+
+Useful commands:
+
+```sh
+./SkyVault.sh build
+./SkyVault.sh frontend
+./SkyVault.sh --skip-frontend-build
+```
+
 Then open:
 
 ```text

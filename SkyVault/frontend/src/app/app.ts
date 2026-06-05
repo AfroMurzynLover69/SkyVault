@@ -38,7 +38,7 @@ export class App implements OnInit {
     this.authenticated.set(state.authenticated);
     this.account.set(state.account ?? null);
     this.files.set(this.withSyntheticFolders(await this.crypto.decryptFileList(state.files ?? [])));
-    this.trashFiles.set(await this.crypto.decryptFileList(state.trashFiles ?? []));
+    this.trashFiles.set(this.withSyntheticFolders(await this.crypto.decryptFileList(state.trashFiles ?? [])));
     this.deviceSessions.set(state.deviceSessions ?? []);
     this.starredPaths.set(state.starredPaths ?? []);
     this.loading.set(false);

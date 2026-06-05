@@ -5,6 +5,8 @@ import { CryptoService } from './crypto.service';
 
 @Injectable({ providedIn: 'root' })
 export class AuthService {
+  private pendingRegistration: { email: string; masterKey: Uint8Array } | null = null;
+
   constructor(
     private readonly api: ApiService,
     private readonly crypto: CryptoService,
@@ -17,8 +19,7 @@ export class AuthService {
     const keys = await this.crypto.deriveKeys(password, salt);
     const wrapped = await this.crypto.wrapMasterKey(keys.kek, masterKey);
 
-    this.crypto.storeMasterKey(normalizedEmail, masterKey);
-    this.crypto.downloadRecoverySheet(normalizedEmail, masterKey);
+    this.pendingRegistration = { email: normalizedEmail, masterKey };
 
     return await this.api.postJsonForm<{ authenticated: boolean; verificationRequired: boolean; email?: string }>('/api/auth/register', {
       email: normalizedEmail,
@@ -30,6 +31,7 @@ export class AuthService {
   }
 
   async login(email: string, password: string) {
+    this.pendingRegistration = null;
     const normalizedEmail = this.normalizeEmail(email);
     const material = await this.api.getCryptoMaterial(normalizedEmail);
     const keys = await this.crypto.deriveKeys(password, fromBase64(material.passwordSalt));
@@ -47,15 +49,25 @@ export class AuthService {
   }
 
   async logout() {
+    this.pendingRegistration = null;
     await this.api.logout();
     this.crypto.clearMasterKey();
   }
 
   async verify(email: string, code: string) {
-    return await this.api.postJsonForm<{ authenticated: boolean }>('/api/auth/verify', {
-      email: this.normalizeEmail(email),
+    const normalizedEmail = this.normalizeEmail(email);
+    const response = await this.api.postJsonForm<{ authenticated: boolean }>('/api/auth/verify', {
+      email: normalizedEmail,
       code,
     });
+
+    if (this.pendingRegistration?.email === normalizedEmail) {
+      this.crypto.storeMasterKey(normalizedEmail, this.pendingRegistration.masterKey);
+      this.crypto.downloadRecoverySheet(normalizedEmail, this.pendingRegistration.masterKey);
+      this.pendingRegistration = null;
+    }
+
+    return response;
   }
 
   private normalizeEmail(email: string) {

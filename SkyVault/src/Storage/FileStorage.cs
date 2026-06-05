@@ -366,36 +366,42 @@ public sealed class FileStorage
         username = NormalizeEmail(username);
         await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         PurgeExpiredTrash(username);
-        int moved = 0;
-        foreach (string selector in fileNames.Select(NormalizeRelativePath).Where(IsValidRelativePath).Distinct(StringComparer.Ordinal))
+        HashSet<string> selectors = NormalizeSelectors(fileNames);
+        HashSet<string> movedSelectors = new(StringComparer.Ordinal);
+
+        foreach (string directory in GetUserDirectories(username))
         {
-            bool movedAnyReplica = false;
+            StorageMetadata metadata = LoadMetadata(directory);
+            bool changed = false;
 
-            foreach ((string directory, StorageMetadataEntry entry) in FindEntriesBySelector(username, selector).Where(item => !item.Entry.InTrash))
+            foreach (StorageMetadataEntry entry in metadata.Entries.Where(entry => !entry.InTrash))
             {
-                StorageMetadata metadata = LoadMetadata(directory);
-                StorageMetadataEntry? writable = metadata.Entries.FirstOrDefault(item => item.Id == entry.Id);
+                IReadOnlyList<string> matchedSelectors = GetMatchedSelectors(entry, selectors);
 
-                if (writable is null)
+                if (matchedSelectors.Count == 0)
                 {
                     continue;
                 }
 
-                writable.InTrash = true;
-                writable.TrashedAt = DateTimeOffset.UtcNow;
-                writable.TrashPath = null;
-                SaveMetadata(directory, metadata);
-                movedAnyReplica = true;
+                entry.InTrash = true;
+                entry.TrashedAt = DateTimeOffset.UtcNow;
+                entry.TrashPath = null;
+                changed = true;
+
+                foreach (string selector in matchedSelectors)
+                {
+                    movedSelectors.Add(selector);
+                }
             }
 
-            if (movedAnyReplica)
+            if (changed)
             {
-                moved += 1;
+                SaveMetadata(directory, metadata);
             }
         }
 
         await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
-        return moved;
+        return movedSelectors.Count;
     }
 
     public async Task<int> EmptyTrashAsync(string username)
@@ -438,19 +444,55 @@ public sealed class FileStorage
         PurgeExpiredTrash(username);
         int restored = 0;
         int skippedBecauseExists = 0;
-        int missingFromTrash = 0;
+        HashSet<string> selectors = NormalizeSelectors(fileNames);
+        HashSet<string> restoredSelectors = new(StringComparer.Ordinal);
+        HashSet<string> skippedSelectors = new(StringComparer.Ordinal);
+        HashSet<string> foundSelectors = new(StringComparer.Ordinal);
+        HashSet<string> activePathHashes = LoadMergedMetadata(username).Entries
+            .Where(entry => !entry.InTrash && !string.IsNullOrWhiteSpace(entry.PathHash))
+            .Select(entry => entry.PathHash)
+            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> selectedTrashPathHashes = LoadMergedMetadata(username).Entries
+            .Where(entry => entry.InTrash && !string.IsNullOrWhiteSpace(entry.PathHash) && GetMatchedSelectors(entry, selectors).Count > 0)
+            .Select(entry => entry.PathHash)
+            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> overwritePathHashes = selectedTrashPathHashes
+            .Where(activePathHashes.Contains)
+            .ToHashSet(StringComparer.Ordinal);
 
-        foreach (string selector in fileNames.Select(NormalizeRelativePath).Where(IsValidRelativePath).Distinct(StringComparer.Ordinal))
+        if (overwriteExisting && overwritePathHashes.Count > 0)
         {
-            bool restoredAnyReplica = false;
+            DeleteActiveEntriesByPathHashAcrossReplicas(username, overwritePathHashes);
+            activePathHashes.ExceptWith(overwritePathHashes);
+        }
 
-            foreach (string directory in GetUserDirectories(username))
+        foreach (string directory in GetUserDirectories(username))
+        {
+            StorageMetadata metadata = LoadMetadata(directory);
+            bool changed = false;
+
+            foreach (StorageMetadataEntry entry in metadata.Entries.Where(entry => entry.InTrash).ToList())
             {
-                StorageMetadata metadata = LoadMetadata(directory);
-                StorageMetadataEntry? entry = metadata.Entries.FirstOrDefault(item => item.InTrash && MatchesSelector(item, selector));
+                IReadOnlyList<string> matchedSelectors = GetMatchedSelectors(entry, selectors);
 
-                if (entry is null)
+                if (matchedSelectors.Count == 0)
                 {
+                    continue;
+                }
+
+                foreach (string selector in matchedSelectors)
+                {
+                    foundSelectors.Add(selector);
+                }
+
+                bool hasConflict = !string.IsNullOrWhiteSpace(entry.PathHash) && activePathHashes.Contains(entry.PathHash);
+
+                if (hasConflict && !overwriteExisting)
+                {
+                    foreach (string selector in matchedSelectors)
+                    {
+                        skippedSelectors.Add(selector);
+                    }
                     continue;
                 }
 
@@ -458,20 +500,23 @@ public sealed class FileStorage
                 entry.TrashPath = null;
                 entry.TrashedAt = null;
                 entry.ModifiedAt = DateTimeOffset.UtcNow;
-                SaveMetadata(directory, metadata);
-                restoredAnyReplica = true;
+                changed = true;
+
+                foreach (string selector in matchedSelectors)
+                {
+                    restoredSelectors.Add(selector);
+                }
             }
 
-            if (restoredAnyReplica)
+            if (changed)
             {
-                restored += 1;
-            }
-            else
-            {
-                missingFromTrash += 1;
+                SaveMetadata(directory, metadata);
             }
         }
 
+        restored = restoredSelectors.Count;
+        skippedBecauseExists = skippedSelectors.Count;
+        int missingFromTrash = selectors.Except(foundSelectors, StringComparer.Ordinal).Count();
         await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
         return (restored, skippedBecauseExists, missingFromTrash);
     }
@@ -481,18 +526,19 @@ public sealed class FileStorage
         username = NormalizeEmail(username);
         await using SemaphoreLease lease = await AcquireUserFileLockAsync(username);
         PurgeExpiredTrash(username);
-        int deleted = 0;
+        HashSet<string> selectors = NormalizeSelectors(fileNames);
+        HashSet<string> deletedSelectors = new(StringComparer.Ordinal);
 
-        foreach (string selector in fileNames.Select(NormalizeRelativePath).Where(IsValidRelativePath).Distinct(StringComparer.Ordinal))
+        foreach (string directory in GetUserDirectories(username))
         {
-            bool deletedAnyReplica = false;
+            StorageMetadata metadata = LoadMetadata(directory);
+            bool changed = false;
 
-            foreach (string directory in GetUserDirectories(username))
+            foreach (StorageMetadataEntry entry in metadata.Entries.Where(entry => entry.InTrash).ToList())
             {
-                StorageMetadata metadata = LoadMetadata(directory);
-                StorageMetadataEntry? entry = metadata.Entries.FirstOrDefault(item => item.InTrash && MatchesSelector(item, selector));
+                IReadOnlyList<string> matchedSelectors = GetMatchedSelectors(entry, selectors);
 
-                if (entry is null)
+                if (matchedSelectors.Count == 0)
                 {
                     continue;
                 }
@@ -503,18 +549,22 @@ public sealed class FileStorage
                 }
 
                 metadata.Entries.Remove(entry);
-                SaveMetadata(directory, metadata);
-                deletedAnyReplica = true;
+                changed = true;
+
+                foreach (string selector in matchedSelectors)
+                {
+                    deletedSelectors.Add(selector);
+                }
             }
 
-            if (deletedAnyReplica)
+            if (changed)
             {
-                deleted += 1;
+                SaveMetadata(directory, metadata);
             }
         }
 
         await userStore.SetUsedBytesAsync(username, GetUsedBytes(username));
-        return deleted;
+        return deletedSelectors.Count;
     }
 
     public async Task<(int Updated, int Conflicts, int Missing)> UpdateEncryptedPathsAsync(string username, IReadOnlyList<EncryptedPathUpdate> updates)
@@ -929,6 +979,54 @@ public sealed class FileStorage
 
             SaveMetadata(directory, metadata);
         }
+    }
+
+    private void DeleteActiveEntriesByPathHashAcrossReplicas(string username, IReadOnlySet<string> pathHashes)
+    {
+        foreach (string directory in GetUserDirectories(username))
+        {
+            StorageMetadata metadata = LoadMetadata(directory);
+            List<StorageMetadataEntry> entries = metadata.Entries
+                .Where(entry => !entry.InTrash && pathHashes.Contains(entry.PathHash))
+                .ToList();
+
+            foreach (StorageMetadataEntry entry in entries)
+            {
+                if (!entry.IsFolder)
+                {
+                    DeleteFileQuietly(GetBlobPath(directory, entry.BlobId));
+                }
+
+                metadata.Entries.Remove(entry);
+            }
+
+            SaveMetadata(directory, metadata);
+        }
+    }
+
+    private static HashSet<string> NormalizeSelectors(IReadOnlyList<string> fileNames)
+    {
+        return fileNames
+            .Select(NormalizeRelativePath)
+            .Where(IsValidRelativePath)
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static IReadOnlyList<string> GetMatchedSelectors(StorageMetadataEntry entry, IReadOnlySet<string> selectors)
+    {
+        List<string> matched = [];
+
+        if (!string.IsNullOrWhiteSpace(entry.PathHash) && selectors.Contains(entry.PathHash))
+        {
+            matched.Add(entry.PathHash);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Id) && selectors.Contains(entry.Id))
+        {
+            matched.Add(entry.Id);
+        }
+
+        return matched;
     }
 
     private string GetWriteDirectory(string username, string relativePath)

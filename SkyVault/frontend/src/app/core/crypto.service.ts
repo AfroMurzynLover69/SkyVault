@@ -64,7 +64,10 @@ export class CryptoService {
     let totalEncryptedBytes = 0;
     let totalChunks = 0;
 
-    if (remaining > 0) {
+    if (remaining === 0) {
+      totalEncryptedBytes = headerBytes + this.chunkFrameOverheadBytes;
+      totalChunks = 1;
+    } else {
       const firstChunkPlain = Math.min(remaining, firstPlainChunkBytes);
       totalEncryptedBytes += headerBytes + this.chunkFrameOverheadBytes + firstChunkPlain;
       remaining -= firstChunkPlain;

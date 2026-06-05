@@ -181,6 +181,10 @@ public sealed class CloudWebServer
             {
                 workloadTimeout.CancelAfter(TimeSpan.FromSeconds(options.DownloadTimeoutSeconds));
             }
+            else if (workload == RequestWorkload.FileOperation)
+            {
+                workloadTimeout.CancelAfter(TimeSpan.FromSeconds(options.FileOperationQueueTimeoutSeconds));
+            }
 
             HttpResponse response = await HandleRequestAsync(request, remoteAddress, workloadTimeout.Token);
             await response.WriteAsync(stream, workloadTimeout.Token);
@@ -460,7 +464,7 @@ public sealed class CloudWebServer
 
         if ((request.Method == "GET" || request.Method == "HEAD") && request.Path == "/storage")
         {
-            return Redirect("/");
+            return Redirect("/?view=storage");
         }
 
         if (request.Method == "POST" && request.Path == "/api/files/update-paths")
